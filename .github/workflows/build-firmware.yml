@@ -1,3 +1,4 @@
+
 name: Build and Release ESP32 Firmware (Arduino IDE)
 
 on:
@@ -10,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -23,12 +25,20 @@ jobs:
         run: |
           arduino-cli core update-index
           arduino-cli core update-index --additional-urls "$ESP32_URL"
-          arduino-cli core install esp32:esp32 --additional-urls "$ESP32_URL"
+          arduino-cli core install esp32:esp32@3.3.12 --additional-urls "$ESP32_URL"
+
+      - name: Install ArduinoJson
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "ArduinoJson"
 
       - name: Compile Arduino Sketch
         run: |
           mkdir -p ./build
-          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build ./firmware
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir ./build \
+            ./firmware
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
