@@ -14,13 +14,20 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Platform Core Packages
+        run: |
+          arduino-cli core update-index
+          arduino-cli core update-index --additional-urls https://github.io
+          arduino-cli core install esp32:esp32 --additional-urls https://github.io
+
       - name: Compile Arduino Sketch
-        uses: arduino/compile-sketches@v1
-        with:
-          fqbn: esp32:esp32:esp32 
-          sketch-paths: ./firmware
-          enable-deltas-report: false
-          cli-compile-flags: --output-dir ./build
+        run: |
+          mkdir -p ./build
+          # This runs the compiler cleanly targeting your exact Main path layout directly
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build ./firmware
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
