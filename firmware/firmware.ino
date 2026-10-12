@@ -11,7 +11,8 @@ const String CURRENT_VERSION = "v1.0.0";
 // Direct URL to your latest firmware.bin in GitHub Releases
 // Format:
 // https://github.com/<owner>/<repo>/releases/latest/download/firmware.bin
-const String FIRMWARE_URL = "";
+const String FIRMWARE_URL = "https://github.com/ThenulSahansa/DeskBot/releases/"
+                            "latest/download/firmware.ino.bin";
 
 // Check interval (e.g., check every 10 minutes)
 unsigned long lastCheck = 0;

@@ -18,7 +18,7 @@ jobs:
         uses: arduino/compile-sketches@v1
         with:
           fqbn: esp32:esp32:esp32da # Adjust to your exact board type
-          sketch-paths: ./esp32_project
+          sketch-paths: ./Main
           enable-deltas-report: false
           cli-compile-flags: --output-dir ./build
 
