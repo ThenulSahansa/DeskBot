@@ -19,7 +19,7 @@ jobs:
 
       - name: Install ESP32 Platform Core Packages
         env:
-          ESP32_URL: https://github.io
+          ESP32_URL: https://espressif.github.io/arduino-esp32/package_esp32_index.json
         run: |
           arduino-cli core update-index
           arduino-cli core update-index --additional-urls "$ESP32_URL"
