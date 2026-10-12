@@ -1,0 +1,32 @@
+name: Build and Release ESP32 Firmware (Arduino IDE)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Compile Arduino Sketch
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: esp32:esp32:esp32da # Adjust to your exact board type
+          sketch-paths: ./esp32_project
+          enable-deltas-report: false
+          cli-compile-flags: --output-dir ./build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./build/*.bin
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
