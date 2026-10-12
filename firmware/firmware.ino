@@ -61,6 +61,7 @@ void setup() {
 
   // Check on boot
   checkForUpdate();
+  pinMode(2, OUTPUT);
 }
 
 void loop() {}

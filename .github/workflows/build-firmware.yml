@@ -17,8 +17,8 @@ jobs:
       - name: Compile Arduino Sketch
         uses: arduino/compile-sketches@v1
         with:
-          fqbn: esp32:esp32:esp32da # Adjust to your exact board type
-          sketch-paths: ./Main
+          fqbn: esp32:esp32:esp32 # Adjust to your exact board type
+          sketch-paths: ./firmware
           enable-deltas-report: false
           cli-compile-flags: --output-dir ./build
 
