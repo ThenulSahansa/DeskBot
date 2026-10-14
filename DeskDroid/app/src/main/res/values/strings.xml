@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">DeskBot</string>
+    <string name="connect">Connect</string>
+    <string name="connecting">Connecting&#8230;</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="check_for_updates">Check for updates</string>
+    <string name="available_bt_devices">Available BT Devices</string>
+    <string name="no_devices_found">No Bluetooth devices found.\nTap below to scan for nearby devices.</string>
+    <string name="scan_for_devices">Scan for Devices</string>
 </resources>
