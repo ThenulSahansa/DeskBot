@@ -1,9 +1,11 @@
-
+#include "BluetoothSerial.h"
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+
 
 // Wi-Fi
 const char *ssid = "HONOR X7b";
@@ -12,17 +14,34 @@ const char *password = "marjppu36u272u6";
 // Version compiled into THIS firmware.
 // Change this before building each new release.
 #define FIRMWARE_VERSION "v1.0.4"
+String device_name = "DeskBot_" FIRMWARE_VERSION;
+
+// Check if Bluetooth is available
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+// Check Serial Port Profile
+#if !defined(CONFIG_BT_SPP_ENABLED)
+#error Serial Port Profile for Bluetooth is not available or not enabled. It is only available for the ESP32 chip.
+#endif
+
+BluetoothSerial SerialBT;
 
 // GitHub repository
 const char *RELEASE_API =
     "https://api.github.com/repos/ThenulSahansa/DeskBot/releases/latest";
+
+const char *DIRECT_FIRMWARE_URL =
+    "https://github.com/ThenulSahansa/DeskBot/releases/latest/download/firmware.ino.bin";
 
 const char *FIRMWARE_ASSET = "firmware.ino.bin";
 
 String latestVersion = "";
 String firmwareURL = "";
 
-void checkForUpdate();
+bool connectWiFi(const char *wifiSsid = ssid, const char *wifiPassword = password);
+void performUpdate();
 
 bool getLatestRelease() {
   WiFiClientSecure client;
@@ -112,24 +131,88 @@ bool getLatestRelease() {
   return true;
 }
 
-void checkForUpdate() {
-  Serial.println("\n[OTA] Checking GitHub for updates...");
-
-  Serial.printf("[OTA] Installed version: %s\n", FIRMWARE_VERSION);
-
-  if (!getLatestRelease()) {
-    Serial.println("[OTA] Could not obtain release information.");
-    return;
+bool connectWiFi(const char *wifiSsid, const char *wifiPassword) {
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
   }
 
-  Serial.printf("[OTA] Latest version:    %s\n", latestVersion.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifiSsid, wifiPassword);
+  Serial.print("[WiFi] Connecting");
 
-  if (latestVersion == FIRMWARE_VERSION) {
-    Serial.println("[OTA] Already up to date.");
-    return;
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Connection failed.");
+    return false;
   }
 
-  Serial.println("[OTA] New version detected.");
+  Serial.printf("[WiFi] Connected! IP: %s, Gateway: %s\n",
+                WiFi.localIP().toString().c_str(),
+                WiFi.gatewayIP().toString().c_str());
+
+  // Test DNS resolution for GitHub
+  IPAddress resolvedIP;
+  if (!WiFi.hostByName("api.github.com", resolvedIP)) {
+    Serial.println("[WiFi] Warning: Hotspot DNS failed. Setting Google/Cloudflare DNS (8.8.8.8)...");
+    WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+                IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+    if (WiFi.hostByName("api.github.com", resolvedIP)) {
+      Serial.printf("[WiFi] DNS resolved via 8.8.8.8: %s\n", resolvedIP.toString().c_str());
+    } else {
+      Serial.println("[WiFi] Error: Could not resolve api.github.com. Verify mobile data on hotspot.");
+    }
+  } else {
+    Serial.printf("[WiFi] DNS OK. api.github.com: %s\n", resolvedIP.toString().c_str());
+  }
+
+  return true;
+}
+
+void performUpdate() {
+  Serial.println("\n[OTA] Update triggered via Bluetooth Serial. Starting update...");
+  SerialBT.println("[OTA] Update triggered via Bluetooth Serial. Starting update...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[OTA] Wi-Fi not connected. Connecting...");
+    SerialBT.println("[OTA] Connecting to Wi-Fi...");
+    if (!connectWiFi(ssid, password)) {
+      Serial.println("[OTA] Could not connect to Wi-Fi. Update aborted.");
+      SerialBT.println("[OTA] Wi-Fi connection failed. Update aborted.");
+      return;
+    }
+  }
+
+  Serial.printf("[OTA] Free heap with BT running: %u bytes (Max contiguous block: %u bytes)\n",
+                (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMaxAllocHeap());
+
+  // Notify user over Bluetooth before stopping BT to free memory
+  SerialBT.println("[OTA] Wi-Fi connected. Freeing Bluetooth memory for TLS download...");
+  SerialBT.flush();
+  delay(300);
+
+  // Stop Bluetooth stack to free ~100KB heap for TLS / mbedTLS buffers
+  SerialBT.end();
+
+  Serial.printf("[OTA] Free heap after stopping BT: %u bytes (Max contiguous block: %u bytes)\n",
+                (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMaxAllocHeap());
+
+  // Obtain the latest release asset URL from GitHub
+  if (!getLatestRelease() || firmwareURL.isEmpty()) {
+    Serial.println("[OTA] Using direct GitHub latest release URL...");
+    firmwareURL = DIRECT_FIRMWARE_URL;
+  }
+
+  if (!latestVersion.isEmpty()) {
+    Serial.printf("[OTA] GitHub latest version: %s\n", latestVersion.c_str());
+  }
+
+  Serial.printf("[OTA] Downloading and installing firmware from: %s\n", firmwareURL.c_str());
 
   WiFiClientSecure client;
   client.setInsecure(); // Testing only; validate TLS in production.
@@ -144,16 +227,20 @@ void checkForUpdate() {
     }
   });
 
-  Serial.println("[OTA] Starting firmware installation...");
-
-  t_httpUpdate_return result =
-      httpUpdate.update(client, firmwareURL, FIRMWARE_VERSION);
+  // Directly perform update without any version comparison
+  t_httpUpdate_return result = httpUpdate.update(client, firmwareURL);
 
   if (result == HTTP_UPDATE_FAILED) {
     Serial.printf("[OTA] Error %d: %s\n", httpUpdate.getLastError(),
                   httpUpdate.getLastErrorString().c_str());
+    // Restore Bluetooth so device can still communicate after a failure
+    SerialBT.begin(device_name);
+    SerialBT.printf("[OTA] Update failed (%d): %s\n", httpUpdate.getLastError(),
+                    httpUpdate.getLastErrorString().c_str());
   } else if (result == HTTP_UPDATE_NO_UPDATES) {
     Serial.println("[OTA] No update installed.");
+    SerialBT.begin(device_name);
+    SerialBT.println("[OTA] No update installed.");
   } else if (result == HTTP_UPDATE_OK) {
     Serial.println("[OTA] Update successful; rebooting.");
   }
@@ -169,28 +256,42 @@ void setup() {
   Serial.printf("OTA free space: %u bytes\n",
                 (unsigned int)ESP.getFreeSketchSpace());
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  Serial.print("[WiFi] Connecting");
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Connection failed.");
-    return;
-  }
-
-  Serial.printf("[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
-
-  checkForUpdate();
+  SerialBT.begin(device_name);
+  Serial.printf("The device with name \"%s\" is started.\nNow you can pair it "
+                "with Bluetooth!\n",
+                device_name.c_str());
 }
 
 void loop() {
-  // Run your normal DeskBot functionality here.
+  // Forward characters from USB Serial to Bluetooth
+  while (Serial.available()) {
+    SerialBT.write(Serial.read());
+  }
+
+  // Forward characters from Bluetooth to USB Serial and listen for Update command
+  static String btBuffer = "";
+  while (SerialBT.available()) {
+    char c = (char)SerialBT.read();
+    Serial.write(c);
+
+    if (c == '\n' || c == '\r') {
+      btBuffer.trim();
+      if (btBuffer.equalsIgnoreCase("Update")) {
+        performUpdate();
+      }
+      btBuffer = "";
+    } else {
+      btBuffer += c;
+      if (btBuffer.equalsIgnoreCase("Update")) {
+        performUpdate();
+        btBuffer = "";
+      }
+    }
+
+    if (btBuffer.length() > 64) {
+      btBuffer = "";
+    }
+  }
+
+  delay(20);
 }
