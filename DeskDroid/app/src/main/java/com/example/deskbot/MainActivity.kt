@@ -43,7 +43,10 @@ import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 import kotlin.math.cos
 import kotlin.math.exp
@@ -73,6 +76,11 @@ class MainActivity : AppCompatActivity() {
     // Pending anchor views for click action after permission check
     private var pendingAnchorButton: MaterialButton? = null
     private var pendingTargetRefButton: MaterialButton? = null
+
+    // Update state properties
+    private var isUpdateCheckActive = false
+    private var isUpdateAvailable = false
+    private var latestVersionTag: String? = null
 
     // Default dimensions & position for the "Connect" (center) state
     private var initialX = 0f
@@ -108,7 +116,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // BroadcastReceiver for discovering Bluetooth devices
+    // BroadcastReceiver for discovering Bluetooth devices and detecting connection drops
     private val bluetoothDiscoveryReceiver = object : BroadcastReceiver() {
         @SuppressLint("MissingPermission")
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -122,17 +130,33 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     device?.let { dev ->
-                        val name = dev.name ?: "Nearby Device (${dev.address.takeLast(5)})"
-                        if (realDevicesList.none { it.address == dev.address }) {
-                            val newItem = RealBluetoothDeviceItem(name, dev.address, isBonded = false, device = dev)
-                            realDevicesList.add(newItem)
-                            devicesAdapter?.notifyDataSetChanged()
-                            emptyTextView?.visibility = View.GONE
+                        val name = dev.name ?: ""
+                        // Only include devices whose name starts with "DeskBot"
+                        if (name.startsWith("DeskBot", ignoreCase = true)) {
+                            if (realDevicesList.none { it.address == dev.address }) {
+                                val newItem = RealBluetoothDeviceItem(name, dev.address, isBonded = false, device = dev)
+                                realDevicesList.add(newItem)
+                                devicesAdapter?.notifyDataSetChanged()
+                                emptyTextView?.visibility = View.GONE
+                            }
                         }
                     }
                 }
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
                     scanProgressBar?.visibility = View.GONE
+                }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED,
+                BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED -> {
+                    val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+
+                    if (connectedDevice != null && (device == null || device.address == connectedDevice?.address)) {
+                        handleBluetoothConnectionLost()
+                    }
                 }
             }
         }
@@ -155,11 +179,16 @@ class MainActivity : AppCompatActivity() {
         val filter = IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_FOUND)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED)
         }
         registerReceiver(bluetoothDiscoveryReceiver, filter)
 
         val connectButton = findViewById<MaterialButton>(R.id.button)
         val targetRefButton = findViewById<MaterialButton>(R.id.button3)
+        val updateButton = findViewById<MaterialButton>(R.id.button2)
+        val versionView = findViewById<TextView>(R.id.versionView)
+        val updateCardView = findViewById<View>(R.id.updateCardView)
 
         targetRefButton.visibility = View.INVISIBLE
 
@@ -186,6 +215,253 @@ class MainActivity : AppCompatActivity() {
                 // Disconnect real device and rewind animation
                 disconnectRealDevice()
                 animateLiquidTransition(connectButton, targetRefButton)
+            }
+        }
+
+        updateButton.setOnClickListener {
+            if (!isConnected) {
+                Toast.makeText(this, "Please connect to a DeskBot device via Bluetooth first.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            if (isUpdateAvailable) {
+                // User clicked "Update to <version>" -> Send "Update" command over Bluetooth
+                val targetVersion = latestVersionTag ?: "new version"
+                sendBluetoothCommand("Update\n")
+
+                Toast.makeText(this, "Sending Update signal to DeskBot over Bluetooth...", Toast.LENGTH_SHORT).show()
+                updateButton.text = getString(R.string.updating_firmware)
+
+                // Update version text view and reset state
+                versionView.text = targetVersion
+                updateButton.postDelayed({
+                    resetUpdateStateAndSlideDown(updateButton, connectButton, updateCardView)
+                }, 2000)
+            } else if (!isUpdateCheckActive) {
+                // Slide update button to top, make disconnect button invisible, and check for updates
+                slideUpAndCheckForUpdates(updateButton, connectButton, versionView, updateCardView)
+            } else {
+                // Toggle back if active
+                resetUpdateStateAndSlideDown(updateButton, connectButton, updateCardView)
+            }
+        }
+    }
+
+    private fun handleBluetoothConnectionLost() {
+        if (!isConnected && activeSocket == null && connectedDevice == null) return
+
+        @SuppressLint("MissingPermission")
+        val devName = connectedDevice?.name ?: "Bluetooth device"
+        try {
+            activeSocket?.close()
+        } catch (_: Exception) {}
+        activeSocket = null
+        connectedDevice = null
+
+        if (isConnected) {
+            Toast.makeText(this, "Bluetooth connection lost ($devName)", Toast.LENGTH_SHORT).show()
+
+            val updateButton = findViewById<MaterialButton>(R.id.button2)
+            val connectButton = findViewById<MaterialButton>(R.id.button)
+            val targetRefButton = findViewById<MaterialButton>(R.id.button3)
+            val updateCardView = findViewById<View>(R.id.updateCardView)
+
+            if (isUpdateCheckActive || isUpdateAvailable) {
+                resetUpdateStateAndSlideDown(updateButton, connectButton, updateCardView)
+            }
+
+            // Rewind liquid bounce animation back to center "Connect" state
+            animateLiquidTransition(connectButton, targetRefButton)
+        }
+    }
+
+    private fun slideUpAndCheckForUpdates(
+        updateButton: MaterialButton,
+        connectButton: MaterialButton,
+        versionView: TextView,
+        updateCardView: View
+    ) {
+        isUpdateCheckActive = true
+
+        // Make the Disconnect button invisible with fade animation
+        connectButton.animate()
+            .alpha(0f)
+            .setDuration(300)
+            .withEndAction { connectButton.visibility = View.INVISIBLE }
+            .start()
+
+        // Slide update button up to top of screen
+        val targetYOffset = -(updateButton.top - (23 * resources.displayMetrics.density))
+        updateButton.animate()
+            .translationY(targetYOffset)
+            .setDuration(600)
+            .setInterpolator(AccelerateDecelerateInterpolator())
+            .start()
+
+        updateButton.text = "Checking for updates..."
+
+        // Fetch latest release from GitHub API
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val url = URL("https://api.github.com/repos/ThenulSahansa/DeskBot/releases/latest")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+                connection.setRequestProperty("User-Agent", "DeskBot-Android-App")
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+                    val json = JSONObject(responseText)
+
+                    val latestTagName = json.optString("tag_name", "").trim()
+                    val releaseBody = json.optString("body", "").trim()
+                    val publishedAt = json.optString("published_at", "").trim()
+
+                    val formattedDate = parsePublishedDate(publishedAt)
+                    val currentVersionTag = versionView.text.toString().trim()
+                    val hasHigherVersion = latestTagName.isNotEmpty() && isHigherVersion(latestTagName, currentVersionTag)
+
+                    withContext(Dispatchers.Main) {
+                        // Show Release Notes / Info Card with fade-in
+                        updateCardView.visibility = View.VISIBLE
+                        updateCardView.alpha = 0f
+                        updateCardView.animate().alpha(1f).setDuration(400).start()
+
+                        val txtUpdateHeader = findViewById<TextView>(R.id.txtUpdateHeader)
+                        val txtCurrentVersion = findViewById<TextView>(R.id.txtCurrentVersion)
+                        val txtLatestVersion = findViewById<TextView>(R.id.txtLatestVersion)
+                        val txtReleaseDate = findViewById<TextView>(R.id.txtReleaseDate)
+                        val txtReleaseNotes = findViewById<TextView>(R.id.txtReleaseNotes)
+                        val btnCloseCard = findViewById<MaterialButton>(R.id.btnCloseUpdateCard)
+
+                        txtCurrentVersion.text = "Installed: $currentVersionTag"
+                        txtLatestVersion.text = "Latest: $latestTagName"
+                        txtReleaseDate.text = "Date: $formattedDate"
+                        txtReleaseNotes.text = if (releaseBody.isNotEmpty()) releaseBody else "No release notes specified for this version."
+
+                        if (hasHigherVersion) {
+                            txtUpdateHeader.text = getString(R.string.new_update_available)
+                            txtUpdateHeader.setTextColor("#FF1744".toColorInt())
+
+                            latestVersionTag = latestTagName
+                            isUpdateAvailable = true
+                            updateButton.text = getString(R.string.update_to_version, latestTagName)
+                            updateButton.strokeColor = ColorStateList.valueOf("#FF1744".toColorInt())
+                            updateButton.backgroundTintList = ColorStateList.valueOf("#1A00E5FF".toColorInt())
+                            btnCloseCard.visibility = View.GONE
+                        } else {
+                            txtUpdateHeader.text = getString(R.string.currently_up_to_date)
+                            txtUpdateHeader.setTextColor("#00E5FF".toColorInt())
+
+                            updateButton.text = "Already up to date"
+                            btnCloseCard.visibility = View.VISIBLE
+                            btnCloseCard.setOnClickListener {
+                                resetUpdateStateAndSlideDown(updateButton, connectButton, updateCardView)
+                            }
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        updateButton.text = "Update check failed ($responseCode)"
+                        updateButton.postDelayed({
+                            resetUpdateStateAndSlideDown(updateButton, connectButton, updateCardView)
+                        }, 2500)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    updateButton.text = "Update check failed"
+                    Toast.makeText(this@MainActivity, "Network error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                    updateButton.postDelayed({
+                        resetUpdateStateAndSlideDown(updateButton, connectButton, updateCardView)
+                    }, 2500)
+                }
+            }
+        }
+    }
+
+    private fun parsePublishedDate(publishedAt: String): String {
+        if (publishedAt.isEmpty()) return "N/A"
+        return try {
+            publishedAt.split("T").firstOrNull() ?: publishedAt
+        } catch (_: Exception) {
+            publishedAt
+        }
+    }
+
+    private fun resetUpdateStateAndSlideDown(
+        updateButton: MaterialButton,
+        connectButton: MaterialButton,
+        updateCardView: View
+    ) {
+        // Fade out Release Notes Card
+        updateCardView.animate()
+            .alpha(0f)
+            .setDuration(300)
+            .withEndAction { updateCardView.visibility = View.GONE }
+            .start()
+
+        // Slide update button back down to bottom position
+        updateButton.animate()
+            .translationY(0f)
+            .setDuration(600)
+            .setInterpolator(AccelerateDecelerateInterpolator())
+            .withEndAction {
+                updateButton.text = getString(R.string.check_for_updates)
+                updateButton.strokeColor = ColorStateList.valueOf("#00E5FF".toColorInt())
+                updateButton.backgroundTintList = ColorStateList.valueOf("#121A24".toColorInt())
+
+                // Restore top-right Disconnect button if still connected
+                if (isConnected) {
+                    connectButton.visibility = View.VISIBLE
+                    connectButton.animate().alpha(1f).setDuration(300).start()
+                }
+            }
+            .start()
+
+        isUpdateCheckActive = false
+        isUpdateAvailable = false
+    }
+
+    private fun isHigherVersion(latestTag: String, currentTag: String): Boolean {
+        val cleanLatest = latestTag.replace(Regex("[^0-9.]"), "")
+        val cleanCurrent = currentTag.replace(Regex("[^0-9.]"), "")
+
+        val latestParts = cleanLatest.split(".").map { it.toIntOrNull() ?: 0 }
+        val currentParts = cleanCurrent.split(".").map { it.toIntOrNull() ?: 0 }
+
+        val maxLength = maxOf(latestParts.size, currentParts.size)
+        for (i in 0 until maxLength) {
+            val latestPart = latestParts.getOrElse(i) { 0 }
+            val currentPart = currentParts.getOrElse(i) { 0 }
+
+            if (latestPart > currentPart) return true
+            if (latestPart < currentPart) return false
+        }
+        return false
+    }
+
+    private fun sendBluetoothCommand(command: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val outputStream = activeSocket?.outputStream
+                if (outputStream != null) {
+                    outputStream.write(command.toByteArray())
+                    outputStream.flush()
+                } else {
+                    withContext(Dispatchers.Main) {
+                        handleBluetoothConnectionLost()
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    handleBluetoothConnectionLost()
+                }
             }
         }
     }
@@ -239,11 +515,13 @@ class MainActivity : AppCompatActivity() {
 
         realDevicesList.clear()
 
-        // Populate paired/bonded devices
+        // Populate paired/bonded devices starting with "DeskBot"
         val bonded = bluetoothAdapter?.bondedDevices
         bonded?.forEach { dev ->
-            val name = dev.name ?: "Paired Device (${dev.address})"
-            realDevicesList.add(RealBluetoothDeviceItem(name, dev.address, isBonded = true, device = dev))
+            val name = dev.name ?: ""
+            if (name.startsWith("DeskBot", ignoreCase = true)) {
+                realDevicesList.add(RealBluetoothDeviceItem(name, dev.address, isBonded = true, device = dev))
+            }
         }
 
         val popupWidth = (300 * resources.displayMetrics.density).toInt()
@@ -311,7 +589,7 @@ class MainActivity : AppCompatActivity() {
 
         scanProgressBar?.visibility = View.VISIBLE
         adapter.startDiscovery()
-        Toast.makeText(this, "Scanning for nearby Bluetooth devices...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Scanning for nearby DeskBot devices...", Toast.LENGTH_SHORT).show()
     }
 
     @SuppressLint("MissingPermission")

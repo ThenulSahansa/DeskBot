@@ -5,6 +5,12 @@
     <string name="disconnect">Disconnect</string>
     <string name="check_for_updates">Check for updates</string>
     <string name="available_bt_devices">Available BT Devices</string>
-    <string name="no_devices_found">No Bluetooth devices found.\nTap below to scan for nearby devices.</string>
+    <string name="no_devices_found">No "DeskBot" devices found.\nTap below to scan for nearby DeskBot devices.</string>
     <string name="scan_for_devices">Scan for Devices</string>
+    <string name="updating_firmware">Updating firmware&#8230;</string>
+    <string name="update_to_version">Update to %1$s</string>
+    <string name="new_update_available">NEW UPDATE AVAILABLE</string>
+    <string name="currently_up_to_date">CURRENTLY UP TO DATE</string>
+    <string name="release_notes_label">Release Notes:</string>
+    <string name="close">Close</string>
 </resources>

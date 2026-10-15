@@ -8,6 +8,20 @@
     android:background="@color/black"
     tools:context=".MainActivity">
 
+    <!-- Version Label Top-Left -->
+    <TextView
+        android:id="@+id/versionView"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="v1.0.3"
+        android:textColor="#80D8FF"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <!-- Connect Button: Main liquid neon button -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/button"
@@ -33,6 +47,133 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/button2"
         app:layout_constraintVertical_bias="0.38" />
+
+    <!-- Release Notes / Update Information Card -->
+    <LinearLayout
+        android:id="@+id/updateCardView"
+        android:layout_width="345dp"
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        android:background="@drawable/bg_neon_popup"
+        android:padding="16dp"
+        android:visibility="gone"
+        tools:visibility="visible"
+        android:layout_marginTop="80dp"
+        android:layout_marginBottom="110dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <!-- Status Header (NEW UPDATE AVAILABLE / SYSTEM IS UP TO DATE) -->
+        <TextView
+            android:id="@+id/txtUpdateHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/new_update_available"
+            android:textColor="#00E5FF"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:gravity="center_horizontal" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#3300E5FF"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Versions & Date Summary -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/txtCurrentVersion"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    tools:text="Installed: v1.0.3"
+                    android:textColor="#80D8FF"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/txtLatestVersion"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    tools:text="Latest: v1.0.5"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginTop="2dp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/txtReleaseDate"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                tools:text="Feb 18, 2025"
+                android:textColor="#80D8FF"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#3300E5FF"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/release_notes_label"
+            android:textColor="#00E5FF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="6dp" />
+
+        <!-- Scrollable Release Notes Body -->
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:fillViewport="true">
+
+            <TextView
+                android:id="@+id/txtReleaseNotes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                tools:text="- Bug fixes and performance improvements"
+                android:textColor="#E0E0E0"
+                android:textSize="12sp"
+                android:lineSpacingExtra="3dp" />
+        </ScrollView>
+
+        <!-- Close / Back Button for card -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnCloseUpdateCard"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_marginTop="8dp"
+            android:text="@string/close"
+            android:textColor="#00E5FF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone"
+            app:backgroundTint="#121A24"
+            app:strokeColor="#00E5FF"
+            app:strokeWidth="1dp"
+            app:cornerRadius="8dp" />
+
+    </LinearLayout>
 
     <!-- Button 2: Check for updates (Neon outline button) -->
     <com.google.android.material.button.MaterialButton
