@@ -11,11 +11,14 @@ import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothSocket
-import android.content.BroadcastReceiver
-import android.content.Context
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.os.Build
@@ -44,7 +47,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
@@ -66,7 +68,9 @@ class MainActivity : AppCompatActivity() {
 
     // Bluetooth properties
     private var bluetoothAdapter: BluetoothAdapter? = null
-    private var activeSocket: BluetoothSocket? = null
+    private var bluetoothLeScanner: BluetoothLeScanner? = null
+    private var activeGatt: BluetoothGatt? = null
+    private var commandCharacteristic: BluetoothGattCharacteristic? = null
     private var connectedDevice: BluetoothDevice? = null
     private val realDevicesList = mutableListOf<RealBluetoothDeviceItem>()
     private var devicesAdapter: ArrayAdapter<RealBluetoothDeviceItem>? = null
@@ -90,8 +94,9 @@ class MainActivity : AppCompatActivity() {
     private var initialRadius = 0
     private var isInitialCaptured = false
 
-    // Standard SPP UUID for Serial Port Profile communication
-    private val SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+    // Nordic-UART-style BLE service implemented by the ESP32-C3 firmware.
+    private val BLE_SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+    private val BLE_RX_UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
 
     // Permission launcher
     private val requestPermissionLauncher = registerForActivityResult(
@@ -116,49 +121,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // BroadcastReceiver for discovering Bluetooth devices and detecting connection drops
-    private val bluetoothDiscoveryReceiver = object : BroadcastReceiver() {
+    private val bleScanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                BluetoothDevice.ACTION_FOUND -> {
-                    val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
-
-                    device?.let { dev ->
-                        val name = dev.name ?: ""
-                        // Only include devices whose name starts with "DeskBot"
-                        if (name.startsWith("DeskBot", ignoreCase = true)) {
-                            if (realDevicesList.none { it.address == dev.address }) {
-                                val newItem = RealBluetoothDeviceItem(name, dev.address, isBonded = false, device = dev)
-                                realDevicesList.add(newItem)
-                                devicesAdapter?.notifyDataSetChanged()
-                                emptyTextView?.visibility = View.GONE
-                            }
-                        }
-                    }
-                }
-                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
-                    scanProgressBar?.visibility = View.GONE
-                }
-                BluetoothDevice.ACTION_ACL_DISCONNECTED,
-                BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED -> {
-                    val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
-
-                    if (connectedDevice != null && (device == null || device.address == connectedDevice?.address)) {
-                        handleBluetoothConnectionLost()
-                    }
-                }
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            val name = device.name ?: result.scanRecord?.deviceName ?: return
+            if (name.startsWith("DeskBot", ignoreCase = true) &&
+                realDevicesList.none { it.address == device.address }) {
+                realDevicesList.add(RealBluetoothDeviceItem(name, device.address, false, device))
+                devicesAdapter?.notifyDataSetChanged()
+                emptyTextView?.visibility = View.GONE
             }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            scanProgressBar?.visibility = View.GONE
+            Toast.makeText(this@MainActivity, "BLE scan failed ($errorCode)", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -175,14 +153,7 @@ class MainActivity : AppCompatActivity() {
 
         val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
-
-        val filter = IntentFilter().apply {
-            addAction(BluetoothDevice.ACTION_FOUND)
-            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
-            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
-            addAction(BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED)
-        }
-        registerReceiver(bluetoothDiscoveryReceiver, filter)
+        bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
 
         val connectButton = findViewById<MaterialButton>(R.id.button)
         val targetRefButton = findViewById<MaterialButton>(R.id.button3)
@@ -248,14 +219,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleBluetoothConnectionLost() {
-        if (!isConnected && activeSocket == null && connectedDevice == null) return
+        if (!isConnected && activeGatt == null && connectedDevice == null) return
 
         @SuppressLint("MissingPermission")
         val devName = connectedDevice?.name ?: "Bluetooth device"
         try {
-            activeSocket?.close()
+            activeGatt?.close()
         } catch (_: Exception) {}
-        activeSocket = null
+        activeGatt = null
+        commandCharacteristic = null
         connectedDevice = null
 
         if (isConnected) {
@@ -446,23 +418,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sendBluetoothCommand(command: String) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val outputStream = activeSocket?.outputStream
-                if (outputStream != null) {
-                    outputStream.write(command.toByteArray())
-                    outputStream.flush()
-                } else {
-                    withContext(Dispatchers.Main) {
-                        handleBluetoothConnectionLost()
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                withContext(Dispatchers.Main) {
-                    handleBluetoothConnectionLost()
-                }
-            }
+        val gatt = activeGatt
+        val characteristic = commandCharacteristic
+        if (gatt == null || characteristic == null) {
+            handleBluetoothConnectionLost()
+            return
+        }
+        val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(characteristic, command.toByteArray(),
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            characteristic.value = command.toByteArray()
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
+        if (!accepted) {
+            handleBluetoothConnectionLost()
         }
     }
 
@@ -514,15 +487,6 @@ class MainActivity : AppCompatActivity() {
         emptyTextView = popupView.findViewById(R.id.emptyDevicesText)
 
         realDevicesList.clear()
-
-        // Populate paired/bonded devices starting with "DeskBot"
-        val bonded = bluetoothAdapter?.bondedDevices
-        bonded?.forEach { dev ->
-            val name = dev.name ?: ""
-            if (name.startsWith("DeskBot", ignoreCase = true)) {
-                realDevicesList.add(RealBluetoothDeviceItem(name, dev.address, isBonded = true, device = dev))
-            }
-        }
 
         val popupWidth = (300 * resources.displayMetrics.density).toInt()
         val popupWindow = PopupWindow(
@@ -581,22 +545,15 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun startBluetoothScan() {
         if (!hasBluetoothPermissions()) return
-        val adapter = bluetoothAdapter ?: return
-
-        if (adapter.isDiscovering) {
-            adapter.cancelDiscovery()
-        }
-
         scanProgressBar?.visibility = View.VISIBLE
-        adapter.startDiscovery()
-        Toast.makeText(this, "Scanning for nearby DeskBot devices...", Toast.LENGTH_SHORT).show()
+        bluetoothLeScanner?.startScan(bleScanCallback)
+        Toast.makeText(this, "Scanning for nearby DeskBot BLE devices...", Toast.LENGTH_SHORT).show()
     }
 
     @SuppressLint("MissingPermission")
     private fun stopBluetoothScan() {
-        if (hasBluetoothPermissions() && bluetoothAdapter?.isDiscovering == true) {
-            bluetoothAdapter?.cancelDiscovery()
-        }
+        if (hasBluetoothPermissions()) bluetoothLeScanner?.stopScan(bleScanCallback)
+        scanProgressBar?.visibility = View.GONE
     }
 
     @SuppressLint("MissingPermission")
@@ -611,53 +568,41 @@ class MainActivity : AppCompatActivity() {
         val originalText = button.text.toString()
         button.text = getString(R.string.connecting)
 
-        // Attempt real Bluetooth RFCOMM socket connection asynchronously
-        lifecycleScope.launch(Dispatchers.IO) {
-            stopBluetoothScan()
-            var connectionSuccessful = false
-            var errorMessage = ""
-
-            try {
-                activeSocket?.close()
-            } catch (_: Exception) {}
-
-            try {
-                val socket = dev.createRfcommSocketToServiceRecord(SPP_UUID)
-                socket.connect()
-                activeSocket = socket
-                connectedDevice = dev
-                connectionSuccessful = true
-            } catch (e: Exception) {
-                errorMessage = e.localizedMessage ?: "Device unreachable or refusing connection"
-                // Reflection fallback for certain Android hardware
-                try {
-                    val m = dev.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                    val fallbackSocket = m.invoke(dev, 1) as BluetoothSocket
-                    fallbackSocket.connect()
-                    activeSocket = fallbackSocket
-                    connectedDevice = dev
-                    connectionSuccessful = true
-                } catch (e2: Exception) {
-                    errorMessage = e2.localizedMessage ?: errorMessage
-                    connectionSuccessful = false
-                }
-            }
-
-            withContext(Dispatchers.Main) {
-                button.text = originalText
-
-                if (connectionSuccessful) {
-                    Toast.makeText(this@MainActivity, "Connected to ${item.name}!", Toast.LENGTH_SHORT).show()
-                    // Connection succeeded: Trigger liquid bouncing button animation
-                    animateLiquidTransition(button, targetRef)
+        stopBluetoothScan()
+        activeGatt?.close()
+        activeGatt = dev.connectGatt(this, false, object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
+                    gatt.discoverServices()
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    runOnUiThread { handleBluetoothConnectionLost() }
                 } else {
-                    // Connection failed: Keep button in NOT CONNECTED state and display error notification
-                    val fullError = "Failed to connect to ${item.name}"
-                    Toast.makeText(this@MainActivity, "$fullError: $errorMessage", Toast.LENGTH_LONG).show()
-                    showConnectionErrorNotification(item.name, errorMessage)
+                    runOnUiThread {
+                        button.text = originalText
+                        showConnectionErrorNotification(item.name, "BLE connection error ($status)")
+                    }
+                    gatt.close()
                 }
             }
-        }
+
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                val rx = gatt.getService(BLE_SERVICE_UUID)?.getCharacteristic(BLE_RX_UUID)
+                runOnUiThread {
+                    button.text = originalText
+                    if (status == BluetoothGatt.GATT_SUCCESS && rx != null) {
+                        activeGatt = gatt
+                        commandCharacteristic = rx
+                        connectedDevice = dev
+                        Toast.makeText(this@MainActivity, "Connected to ${item.name}!", Toast.LENGTH_SHORT).show()
+                        animateLiquidTransition(button, targetRef)
+                    } else {
+                        showConnectionErrorNotification(item.name, "DeskBot BLE service was not found")
+                        gatt.disconnect()
+                        gatt.close()
+                    }
+                }
+            }
+        })
     }
 
     private fun showConnectionErrorNotification(deviceName: String, errorDetails: String) {
@@ -694,11 +639,12 @@ class MainActivity : AppCompatActivity() {
     private fun disconnectRealDevice() {
         val name = connectedDevice?.name ?: "Bluetooth device"
         try {
-            activeSocket?.close()
-        } catch (e: IOException) {
+            activeGatt?.close()
+        } catch (e: Exception) {
             e.printStackTrace()
         }
-        activeSocket = null
+        activeGatt = null
+        commandCharacteristic = null
         connectedDevice = null
         Toast.makeText(this, "Disconnected from $name", Toast.LENGTH_SHORT).show()
     }
@@ -847,8 +793,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try {
-            unregisterReceiver(bluetoothDiscoveryReceiver)
-            activeSocket?.close()
+            stopBluetoothScan()
+            activeGatt?.close()
         } catch (e: Exception) {
             e.printStackTrace()
         }

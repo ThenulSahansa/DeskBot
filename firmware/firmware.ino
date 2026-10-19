@@ -1,4 +1,7 @@
-#include "BluetoothSerial.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -16,17 +19,14 @@ const char *password = "marjppu36u272u6";
 #define FIRMWARE_VERSION "v1.0.4"
 String device_name = "DeskBot_" FIRMWARE_VERSION;
 
-// Check if Bluetooth is available
-#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
-#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
-#endif
-
-// Check Serial Port Profile
-#if !defined(CONFIG_BT_SPP_ENABLED)
-#error Serial Port Profile for Bluetooth is not available or not enabled. It is only available for the ESP32 chip.
-#endif
-
-BluetoothSerial SerialBT;
+// ESP32-C3 supports Bluetooth Low Energy (BLE), not Bluetooth Classic SPP.
+// This is a Nordic-UART-style service used by the companion Android app.
+constexpr char BLE_SERVICE_UUID[] = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+constexpr char BLE_RX_UUID[] = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+constexpr char BLE_TX_UUID[] = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
+BLEServer *bleServer = nullptr;
+BLECharacteristic *bleTxCharacteristic = nullptr;
+bool bleClientConnected = false;
 
 // GitHub repository
 const char *RELEASE_API =
@@ -42,6 +42,56 @@ String firmwareURL = "";
 
 bool connectWiFi(const char *wifiSsid = ssid, const char *wifiPassword = password);
 void performUpdate();
+void startBle();
+
+void blePrint(const String &message) {
+  Serial.println(message);
+  if (bleClientConnected && bleTxCharacteristic != nullptr) {
+    bleTxCharacteristic->setValue(message.c_str());
+    bleTxCharacteristic->notify();
+  }
+}
+
+class DeskBotServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *server) override { bleClientConnected = true; }
+  void onDisconnect(BLEServer *server) override {
+    bleClientConnected = false;
+    server->startAdvertising();
+  }
+};
+
+class DeskBotCommandCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    String command = characteristic->getValue().c_str();
+    command.trim();
+    Serial.printf("[BLE] Received: %s\n", command.c_str());
+    if (command.equalsIgnoreCase("Update")) {
+      performUpdate();
+    }
+  }
+};
+
+void startBle() {
+  BLEDevice::init(device_name.c_str());
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new DeskBotServerCallbacks());
+
+  BLEService *service = bleServer->createService(BLE_SERVICE_UUID);
+  bleTxCharacteristic = service->createCharacteristic(
+      BLE_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  bleTxCharacteristic->addDescriptor(new BLE2902());
+  BLECharacteristic *rxCharacteristic = service->createCharacteristic(
+      BLE_RX_UUID, BLECharacteristic::PROPERTY_WRITE |
+                       BLECharacteristic::PROPERTY_WRITE_NR);
+  rxCharacteristic->setCallbacks(new DeskBotCommandCallbacks());
+  service->start();
+
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  advertising->addServiceUUID(BLE_SERVICE_UUID);
+  advertising->setScanResponse(true);
+  advertising->start();
+  Serial.printf("BLE device \"%s\" is advertising.\n", device_name.c_str());
+}
 
 bool getLatestRelease() {
   WiFiClientSecure client;
@@ -175,15 +225,15 @@ bool connectWiFi(const char *wifiSsid, const char *wifiPassword) {
 }
 
 void performUpdate() {
-  Serial.println("\n[OTA] Update triggered via Bluetooth Serial. Starting update...");
-  SerialBT.println("[OTA] Update triggered via Bluetooth Serial. Starting update...");
+  Serial.println("\n[OTA] Update triggered via BLE. Starting update...");
+  blePrint("[OTA] Update triggered via BLE. Starting update...");
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[OTA] Wi-Fi not connected. Connecting...");
-    SerialBT.println("[OTA] Connecting to Wi-Fi...");
+    blePrint("[OTA] Connecting to Wi-Fi...");
     if (!connectWiFi(ssid, password)) {
       Serial.println("[OTA] Could not connect to Wi-Fi. Update aborted.");
-      SerialBT.println("[OTA] Wi-Fi connection failed. Update aborted.");
+      blePrint("[OTA] Wi-Fi connection failed. Update aborted.");
       return;
     }
   }
@@ -191,15 +241,17 @@ void performUpdate() {
   Serial.printf("[OTA] Free heap with BT running: %u bytes (Max contiguous block: %u bytes)\n",
                 (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMaxAllocHeap());
 
-  // Notify user over Bluetooth before stopping BT to free memory
-  SerialBT.println("[OTA] Wi-Fi connected. Freeing Bluetooth memory for TLS download...");
-  SerialBT.flush();
+  // Notify the app before stopping BLE to free memory.
+  blePrint("[OTA] Wi-Fi connected. Freeing BLE memory for TLS download...");
   delay(300);
 
-  // Stop Bluetooth stack to free ~100KB heap for TLS / mbedTLS buffers
-  SerialBT.end();
+  // Stop BLE before the TLS download. BLE can be recreated if the update fails.
+  BLEDevice::deinit(true);
+  bleServer = nullptr;
+  bleTxCharacteristic = nullptr;
+  bleClientConnected = false;
 
-  Serial.printf("[OTA] Free heap after stopping BT: %u bytes (Max contiguous block: %u bytes)\n",
+  Serial.printf("[OTA] Free heap after stopping BLE: %u bytes (Max contiguous block: %u bytes)\n",
                 (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMaxAllocHeap());
 
   // Obtain the latest release asset URL from GitHub
@@ -233,14 +285,13 @@ void performUpdate() {
   if (result == HTTP_UPDATE_FAILED) {
     Serial.printf("[OTA] Error %d: %s\n", httpUpdate.getLastError(),
                   httpUpdate.getLastErrorString().c_str());
-    // Restore Bluetooth so device can still communicate after a failure
-    SerialBT.begin(device_name);
-    SerialBT.printf("[OTA] Update failed (%d): %s\n", httpUpdate.getLastError(),
-                    httpUpdate.getLastErrorString().c_str());
+    startBle();
+    blePrint("[OTA] Update failed (" + String(httpUpdate.getLastError()) +
+             "): " + httpUpdate.getLastErrorString());
   } else if (result == HTTP_UPDATE_NO_UPDATES) {
     Serial.println("[OTA] No update installed.");
-    SerialBT.begin(device_name);
-    SerialBT.println("[OTA] No update installed.");
+    startBle();
+    blePrint("[OTA] No update installed.");
   } else if (result == HTTP_UPDATE_OK) {
     Serial.println("[OTA] Update successful; rebooting.");
   }
@@ -256,42 +307,9 @@ void setup() {
   Serial.printf("OTA free space: %u bytes\n",
                 (unsigned int)ESP.getFreeSketchSpace());
 
-  SerialBT.begin(device_name);
-  Serial.printf("The device with name \"%s\" is started.\nNow you can pair it "
-                "with Bluetooth!\n",
-                device_name.c_str());
+  startBle();
 }
 
 void loop() {
-  // Forward characters from USB Serial to Bluetooth
-  while (Serial.available()) {
-    SerialBT.write(Serial.read());
-  }
-
-  // Forward characters from Bluetooth to USB Serial and listen for Update command
-  static String btBuffer = "";
-  while (SerialBT.available()) {
-    char c = (char)SerialBT.read();
-    Serial.write(c);
-
-    if (c == '\n' || c == '\r') {
-      btBuffer.trim();
-      if (btBuffer.equalsIgnoreCase("Update")) {
-        performUpdate();
-      }
-      btBuffer = "";
-    } else {
-      btBuffer += c;
-      if (btBuffer.equalsIgnoreCase("Update")) {
-        performUpdate();
-        btBuffer = "";
-      }
-    }
-
-    if (btBuffer.length() > 64) {
-      btBuffer = "";
-    }
-  }
-
   delay(20);
 }

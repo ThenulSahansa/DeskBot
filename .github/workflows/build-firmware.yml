@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir -p ./build
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
+            --fqbn esp32:esp32:esp32c3:PartitionScheme=min_spiffs \
             --output-dir ./build \
             ./firmware
 
