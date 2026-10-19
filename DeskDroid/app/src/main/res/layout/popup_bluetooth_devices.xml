@@ -1,75 +1,132 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="300dp"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:background="@drawable/bg_ios_bottom_sheet"
     android:orientation="vertical"
-    android:background="@drawable/bg_neon_popup"
-    android:padding="12dp">
+    android:paddingStart="20dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="20dp"
+    android:paddingBottom="24dp">
 
-    <LinearLayout
+    <!-- iOS Sheet Grabber Handle -->
+    <View
+        android:layout_width="36dp"
+        android:layout_height="5dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginBottom="14dp"
+        android:background="@drawable/bg_ios_grabber" />
+
+    <!-- Sheet Header Row -->
+    <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingStart="4dp"
-        android:paddingEnd="4dp"
-        android:paddingTop="2dp"
-        android:paddingBottom="6dp">
+        android:layout_marginBottom="12dp">
 
-        <TextView
-            android:id="@+id/popupTitle"
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/available_bt_devices"
-            android:textColor="#00E5FF"
-            android:textSize="14sp"
-            android:textStyle="bold" />
+            android:layout_marginEnd="12dp"
+            android:orientation="vertical"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btnScanDevices"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent">
+
+            <TextView
+                android:id="@+id/popupTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/nearby_devices_title"
+                android:textColor="@color/ios_label_primary"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="@string/nearby_devices_subtitle"
+                android:textColor="@color/ios_label_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnScanDevices"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:background="@drawable/bg_ios_secondary_button"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/scan_for_devices"
+            android:textColor="@color/ios_blue"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            app:cornerRadius="16dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
 
         <ProgressBar
             android:id="@+id/scanProgressBar"
             android:layout_width="18dp"
             android:layout_height="18dp"
+            android:layout_marginEnd="8dp"
             android:indeterminate="true"
-            android:visibility="gone" />
-    </LinearLayout>
+            android:indeterminateTint="@color/ios_blue"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="@id/btnScanDevices"
+            app:layout_constraintEnd_toStartOf="@id/btnScanDevices"
+            app:layout_constraintTop_toTopOf="@id/btnScanDevices" />
 
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!-- Divider Line -->
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
-        android:background="#00E5FF"
-        android:layout_marginBottom="4dp" />
+        android:layout_marginBottom="8dp"
+        android:background="@color/ios_separator" />
 
+    <!-- Devices List Container -->
     <ListView
         android:id="@+id/deviceListView"
         android:layout_width="match_parent"
-        android:layout_height="180dp"
-        android:divider="#1A00E5FF"
-        android:dividerHeight="1dp" />
+        android:layout_height="220dp"
+        android:divider="@color/ios_separator"
+        android:dividerHeight="1dp"
+        android:overScrollMode="never"
+        android:scrollbars="none" />
 
-    <TextView
-        android:id="@+id/emptyDevicesText"
+    <!-- Empty State -->
+    <LinearLayout
+        android:id="@+id/emptyDevicesContainer"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/no_devices_found"
-        android:textColor="#80D8FF"
-        android:textSize="12sp"
+        android:layout_height="160dp"
         android:gravity="center"
-        android:padding="16dp"
-        android:visibility="gone" />
+        android:orientation="vertical"
+        android:visibility="gone">
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btnScanDevices"
-        android:layout_width="match_parent"
-        android:layout_height="38dp"
-        android:layout_marginTop="6dp"
-        android:text="@string/scan_for_devices"
-        android:textColor="#00E5FF"
-        android:textSize="12sp"
-        android:textStyle="bold"
-        app:backgroundTint="#121A24"
-        app:strokeColor="#00E5FF"
-        app:strokeWidth="1dp"
-        app:cornerRadius="8dp" />
+        <ImageView
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:src="@drawable/ic_ios_antenna"
+            app:tint="@color/ios_label_tertiary"
+            android:contentDescription="@string/app_name" />
+
+        <TextView
+            android:id="@+id/emptyDevicesText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center"
+            android:text="@string/no_devices_found"
+            android:textColor="@color/ios_label_secondary"
+            android:textSize="13sp" />
+    </LinearLayout>
+
 </LinearLayout>

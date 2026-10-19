@@ -2,219 +2,596 @@
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
-    android:id="@+id/main"
+    android:id="@+id/mainRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/black"
-    tools:context=".MainActivity">
+    android:background="@color/ios_black">
 
-    <!-- Version Label Top-Left -->
-    <TextView
-        android:id="@+id/versionView"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="v1.0.3"
-        android:textColor="#80D8FF"
-        android:textSize="12sp"
-        android:textStyle="bold"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="16dp"
+    <!-- Layer 0: Ambient Liquid Glass Background -->
+    <com.example.deskbot.IosAmbientLiquidGlassView
+        android:id="@+id/ambientLiquidView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Connect Button: Main liquid neon button -->
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/button"
-        android:layout_width="160dp"
-        android:layout_height="160dp"
-        android:text="@string/connect"
-        android:textColor="#000000"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:insetTop="0dp"
-        android:insetBottom="0dp"
-        android:insetLeft="0dp"
-        android:insetRight="0dp"
-        android:paddingStart="4dp"
-        android:paddingEnd="4dp"
-        app:cornerRadius="80dp"
-        app:backgroundTint="@color/neon_blue"
-        app:strokeColor="@color/neon_blue_light"
-        app:strokeWidth="3dp"
-        app:elevation="12dp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toTopOf="@+id/button2"
-        app:layout_constraintVertical_bias="0.38" />
+    <!-- Safe Inset Container -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/safeContentContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:paddingStart="20dp"
+        android:paddingEnd="20dp">
 
-    <!-- Release Notes / Update Information Card -->
-    <LinearLayout
-        android:id="@+id/updateCardView"
-        android:layout_width="345dp"
-        android:layout_height="0dp"
-        android:orientation="vertical"
-        android:background="@drawable/bg_neon_popup"
-        android:padding="16dp"
-        android:visibility="gone"
-        tools:visibility="visible"
-        android:layout_marginTop="80dp"
-        android:layout_marginBottom="110dp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent">
-
-        <!-- Status Header (NEW UPDATE AVAILABLE / SYSTEM IS UP TO DATE) -->
-        <TextView
-            android:id="@+id/txtUpdateHeader"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/new_update_available"
-            android:textColor="#00E5FF"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            android:gravity="center_horizontal" />
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:background="#3300E5FF"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="8dp" />
-
-        <!-- Versions & Date Summary -->
+        <!-- iOS Dynamic Island Pill (Top Center) -->
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/txtCurrentVersion"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    tools:text="Installed: v1.0.3"
-                    android:textColor="#80D8FF"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/txtLatestVersion"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    tools:text="Latest: v1.0.5"
-                    android:textColor="#FFFFFF"
-                    android:textSize="13sp"
-                    android:textStyle="bold"
-                    android:layout_marginTop="2dp" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/txtReleaseDate"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                tools:text="Feb 18, 2025"
-                android:textColor="#80D8FF"
-                android:textSize="11sp" />
-        </LinearLayout>
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:background="#3300E5FF"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="8dp" />
-
-        <TextView
+            android:id="@+id/layoutDynamicIsland"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/release_notes_label"
-            android:textColor="#00E5FF"
-            android:textSize="12sp"
-            android:textStyle="bold"
-            android:layout_marginBottom="6dp" />
-
-        <!-- Scrollable Release Notes Body -->
-        <ScrollView
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:fillViewport="true">
-
-            <TextView
-                android:id="@+id/txtReleaseNotes"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                tools:text="- Bug fixes and performance improvements"
-                android:textColor="#E0E0E0"
-                android:textSize="12sp"
-                android:lineSpacingExtra="3dp" />
-        </ScrollView>
-
-        <!-- Close / Back Button for card -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnCloseUpdateCard"
-            android:layout_width="match_parent"
             android:layout_height="40dp"
             android:layout_marginTop="8dp"
-            android:text="@string/close"
-            android:textColor="#00E5FF"
-            android:textSize="12sp"
-            android:textStyle="bold"
-            android:visibility="gone"
-            app:backgroundTint="#121A24"
-            app:strokeColor="#00E5FF"
-            app:strokeWidth="1dp"
-            app:cornerRadius="8dp" />
+            android:background="@drawable/bg_ios_dynamic_island"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent">
 
-    </LinearLayout>
+            <ImageView
+                android:id="@+id/ivIslandIcon"
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:src="@drawable/ic_ios_bluetooth"
+                app:tint="@color/ios_blue"
+                android:contentDescription="@string/app_name" />
 
-    <!-- Button 2: Check for updates (Neon outline button) -->
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/button2"
-        android:layout_width="345dp"
-        android:layout_height="52dp"
-        android:text="@string/check_for_updates"
-        android:textColor="@color/neon_blue"
-        android:textSize="16sp"
-        android:textStyle="bold"
-        app:cornerRadius="16dp"
-        app:backgroundTint="@color/dark_surface"
-        app:strokeColor="@color/neon_blue"
-        app:strokeWidth="2dp"
-        app:elevation="6dp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
+            <TextView
+                android:id="@+id/tvIslandTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/island_idle"
+                android:textColor="@color/ios_label_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <!-- Island Status Dot Indicator -->
+            <View
+                android:id="@+id/viewIslandDot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_ios_glass_pill"
+                android:backgroundTint="@color/ios_label_tertiary" />
+
+            <ProgressBar
+                android:id="@+id/islandProgressBar"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginStart="8dp"
+                android:indeterminate="true"
+                android:indeterminateTint="@color/ios_blue"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- iOS Large Title Navigation Header -->
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:id="@+id/navigationHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            app:layout_constraintTop_toBottomOf="@id/layoutDynamicIsland">
+
+            <TextView
+                android:id="@+id/tvAppTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/desk_bot_title"
+                android:textColor="@color/ios_label_primary"
+                android:textSize="32sp"
+                android:textStyle="bold"
+                android:letterSpacing="-0.02"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <TextView
+                android:id="@+id/tvAppSubtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_subtitle"
+                android:textColor="@color/ios_label_secondary"
+                android:textSize="13sp"
+                app:layout_constraintStart_toStartOf="@id/tvAppTitle"
+                app:layout_constraintTop_toBottomOf="@id/tvAppTitle" />
+
+            <!-- Quick Action Glass Pills (Top Right) -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnQuickScan"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:backgroundTint="#24FFFFFF"
+                android:contentDescription="@string/scan_for_devices"
+                app:cornerRadius="20dp"
+                app:icon="@drawable/ic_ios_antenna"
+                app:iconGravity="textStart"
+                app:iconPadding="0dp"
+                app:iconSize="18dp"
+                app:iconTint="@color/ios_cyan"
+                app:strokeColor="@color/ios_surface_glass_rim"
+                app:strokeWidth="1dp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <!-- Main Scrollable Content Area -->
+        <androidx.core.widget.NestedScrollView
+            android:id="@+id/scrollContainer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="8dp"
+            android:fillViewport="true"
+            android:overScrollMode="never"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/navigationHeader">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingBottom="24dp">
+
+                <!-- 1. Hero Liquid Glass Device Card -->
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/cardHeroDevice"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_ios_glass_card_hero"
+                    android:paddingStart="20dp"
+                    android:paddingTop="24dp"
+                    android:paddingEnd="20dp"
+                    android:paddingBottom="24dp">
+
+                    <!-- Robot Glass Glow Orb -->
+                    <FrameLayout
+                        android:id="@+id/layoutOrbContainer"
+                        android:layout_width="72dp"
+                        android:layout_height="72dp"
+                        android:background="@drawable/bg_ios_glass_pill"
+                        android:backgroundTint="#1A64D2FF"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent">
+
+                        <ImageView
+                            android:id="@+id/ivHeroRobot"
+                            android:layout_width="38dp"
+                            android:layout_height="38dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_ios_robot"
+                            app:tint="@color/ios_cyan"
+                            android:contentDescription="@string/app_name" />
+                    </FrameLayout>
+
+                    <!-- Device State Title -->
+                    <TextView
+                        android:id="@+id/tvHeroTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:text="DeskBot ESP32"
+                        android:textColor="@color/ios_label_primary"
+                        android:textSize="20sp"
+                        android:textStyle="bold"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/layoutOrbContainer" />
+
+                    <!-- Device State Subtitle -->
+                    <TextView
+                        android:id="@+id/tvHeroSubtitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/connection_ready_hint"
+                        android:textColor="@color/ios_label_secondary"
+                        android:textSize="13sp"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/tvHeroTitle" />
+
+                    <!-- Primary Interactive Liquid Connect Action Button -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnMainAction"
+                        android:layout_width="match_parent"
+                        android:layout_height="52dp"
+                        android:layout_marginTop="20dp"
+                        android:background="@drawable/bg_ios_primary_button"
+                        android:elevation="6dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="@string/connect"
+                        android:textColor="@color/ios_label_primary"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="18dp"
+                        app:icon="@drawable/ic_ios_bluetooth"
+                        app:iconGravity="textStart"
+                        app:iconPadding="8dp"
+                        app:iconSize="18dp"
+                        app:iconTint="@color/ios_label_primary"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/tvHeroSubtitle" />
+
+                </androidx.constraintlayout.widget.ConstraintLayout>
+
+                <!-- 2. System Telemetry Group Header -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginTop="22dp"
+                    android:layout_marginBottom="8dp"
+                    android:letterSpacing="0.06"
+                    android:text="@string/telemetry_header"
+                    android:textColor="@color/ios_label_tertiary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <!-- Telemetry Glass Grid Card -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_ios_glass_card"
+                    android:orientation="horizontal"
+                    android:padding="14dp">
+
+                    <!-- Metric 1: Link Status -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_ios_telemetry_item"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/status_label"
+                            android:textColor="@color/ios_label_tertiary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvTelemetryStatus"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/status_offline"
+                            android:textColor="@color/ios_label_secondary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <Space
+                        android:layout_width="8dp"
+                        android:layout_height="1dp" />
+
+                    <!-- Metric 2: Radio Link -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_ios_telemetry_item"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/signal_label"
+                            android:textColor="@color/ios_label_tertiary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvTelemetryRadio"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/signal_ready"
+                            android:textColor="@color/ios_cyan"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <Space
+                        android:layout_width="8dp"
+                        android:layout_height="1dp" />
+
+                    <!-- Metric 3: BLE MTU -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_ios_telemetry_item"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/channel_label"
+                            android:textColor="@color/ios_label_tertiary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvTelemetryMtu"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/channel_value"
+                            android:textColor="@color/ios_label_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- 3. Firmware & Software OTA Group Header -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginTop="22dp"
+                    android:layout_marginBottom="8dp"
+                    android:letterSpacing="0.06"
+                    android:text="@string/updates_header"
+                    android:textColor="@color/ios_label_tertiary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <!-- Firmware & Updates Glass Card -->
+                <LinearLayout
+                    android:id="@+id/cardFirmware"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_ios_glass_card"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content">
+
+                        <!-- CPU Icon Container -->
+                        <FrameLayout
+                            android:id="@+id/ivCpuBadge"
+                            android:layout_width="44dp"
+                            android:layout_height="44dp"
+                            android:background="@drawable/bg_ios_glass_pill"
+                            android:backgroundTint="#240A84FF"
+                            app:layout_constraintBottom_toBottomOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="parent">
+
+                            <ImageView
+                                android:layout_width="22dp"
+                                android:layout_height="22dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_ios_cpu"
+                                app:tint="@color/ios_blue"
+                                android:contentDescription="@string/updates_header" />
+                        </FrameLayout>
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="14dp"
+                            android:layout_marginEnd="10dp"
+                            android:orientation="vertical"
+                            app:layout_constraintBottom_toBottomOf="parent"
+                            app:layout_constraintEnd_toStartOf="@id/btnCheckUpdates"
+                            app:layout_constraintStart_toEndOf="@id/ivCpuBadge"
+                            app:layout_constraintTop_toTopOf="parent">
+
+                            <LinearLayout
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:gravity="center_vertical"
+                                android:orientation="horizontal">
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="DeskBot OS"
+                                    android:textColor="@color/ios_label_primary"
+                                    android:textSize="16sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:id="@+id/tvCurrentVersion"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginStart="8dp"
+                                    android:background="@drawable/bg_ios_glass_pill"
+                                    android:backgroundTint="#2464D2FF"
+                                    android:paddingStart="8dp"
+                                    android:paddingTop="2dp"
+                                    android:paddingEnd="8dp"
+                                    android:paddingBottom="2dp"
+                                    android:text="@string/default_version"
+                                    android:textColor="@color/ios_cyan"
+                                    android:textSize="11sp"
+                                    android:textStyle="bold" />
+                            </LinearLayout>
+
+                            <TextView
+                                android:id="@+id/tvUpdateStatus"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="3dp"
+                                android:text="@string/check_for_updates"
+                                android:textColor="@color/ios_label_secondary"
+                                android:textSize="12sp" />
+                        </LinearLayout>
+
+                        <!-- iOS Action Button for Update -->
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnCheckUpdates"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_ios_secondary_button"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="14dp"
+                            android:text="Check"
+                            android:textColor="@color/ios_label_primary"
+                            android:textSize="13sp"
+                            android:textStyle="bold"
+                            app:cornerRadius="16dp"
+                            app:layout_constraintBottom_toBottomOf="parent"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintTop_toTopOf="parent" />
+
+                    </androidx.constraintlayout.widget.ConstraintLayout>
+
+                    <!-- Active OTA Progress Section (Hidden unless flashing) -->
+                    <LinearLayout
+                        android:id="@+id/layoutOtaProgress"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <View
+                            android:layout_width="match_parent"
+                            android:layout_height="1dp"
+                            android:background="@color/ios_separator" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/tvOtaStatusLabel"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/updating_firmware"
+                                android:textColor="@color/ios_label_primary"
+                                android:textSize="12sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/tvOtaPercentage"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="0%"
+                                android:textColor="@color/ios_cyan"
+                                android:textSize="12sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+
+                        <ProgressBar
+                            android:id="@+id/progressBarOta"
+                            style="?android:attr/progressBarStyleHorizontal"
+                            android:layout_width="match_parent"
+                            android:layout_height="6dp"
+                            android:layout_marginTop="8dp"
+                            android:max="100"
+                            android:progress="0"
+                            android:progressBackgroundTint="#33FFFFFF"
+                            android:progressTint="@color/ios_cyan" />
+                    </LinearLayout>
+
+                    <!-- Release Notes Panel (Hidden unless update available) -->
+                    <LinearLayout
+                        android:id="@+id/layoutReleaseNotesCard"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:background="@drawable/bg_ios_telemetry_item"
+                        android:orientation="vertical"
+                        android:padding="14dp"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/tvReleaseNotesTitle"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/new_update_available"
+                            android:textColor="@color/ios_orange"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvReleaseNotesDate"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:textColor="@color/ios_label_tertiary"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/tvReleaseNotesContent"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:lineSpacingExtra="2dp"
+                            android:textColor="@color/ios_label_secondary"
+                            android:textSize="12sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnInstallUpdateNow"
+                            android:layout_width="match_parent"
+                            android:layout_height="44dp"
+                            android:layout_marginTop="12dp"
+                            android:background="@drawable/bg_ios_primary_button"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:text="@string/update_now"
+                            android:textColor="@color/ios_label_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold"
+                            app:cornerRadius="14dp" />
+                    </LinearLayout>
+
+                </LinearLayout>
+
+            </LinearLayout>
+        </androidx.core.widget.NestedScrollView>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!-- Top Overlay: iOS Energized NameDrop Wave Animation View -->
+    <com.example.deskbot.IosNameDropView
+        android:id="@+id/nameDropView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:elevation="50dp"
         app:layout_constraintBottom_toBottomOf="parent"
-        android:layout_marginBottom="48dp" />
-
-    <!-- Button 3: Target reference for top-right corner positioning -->
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/button3"
-        android:layout_width="115dp"
-        android:layout_height="40dp"
-        android:text="@string/disconnect"
-        android:visibility="invisible"
-        tools:visibility="visible"
-        android:textSize="11sp"
-        android:textStyle="bold"
-        android:insetTop="0dp"
-        android:insetBottom="0dp"
-        android:insetLeft="0dp"
-        android:insetRight="0dp"
-        android:paddingStart="4dp"
-        android:paddingEnd="4dp"
-        app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="8dp"
-        tools:layout_editor_absoluteX="319dp"
-        tools:layout_editor_absoluteY="2dp" />
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -2,180 +2,126 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <HTTPUpdate.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
-
-// Wi-Fi
-const char *ssid = "HONOR X7b";
-const char *password = "marjppu36u272u6";
-
-// Version compiled into THIS firmware.
-// Change this before building each new release.
-String device_name = "DeskBot_v1.0.3";
+#include <Update.h>
 
 // ESP32-C3 supports Bluetooth Low Energy (BLE), not Bluetooth Classic SPP.
-// This is a BLE write service used by the companion Android app.
+// The Android app checks GitHub, downloads the binary, then sends it here.
+constexpr char DEVICE_NAME[] = "DeskBot";
 constexpr char BLE_SERVICE_UUID[] = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
-constexpr char BLE_RX_UUID[] = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+constexpr char BLE_COMMAND_UUID[] = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+constexpr char BLE_STATUS_UUID[] = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
+constexpr char BLE_FIRMWARE_UUID[] = "6E400004-B5A3-F393-E0A9-E50E24DCCA9E";
+
 BLEServer *bleServer = nullptr;
+BLECharacteristic *statusCharacteristic = nullptr;
+bool otaInProgress = false;
+size_t expectedFirmwareBytes = 0;
+size_t writtenFirmwareBytes = 0;
 
-// The app decides whether an update exists. The C3 only downloads this URL.
-const char *DIRECT_FIRMWARE_URL = "https://github.com/ThenulSahansa/DeskBot/"
-                                  "releases/latest/download/firmware.ino.bin";
+void sendStatus(const char *message) {
+  Serial.println(message);
+  if (statusCharacteristic != nullptr && bleServer != nullptr &&
+      bleServer->getConnectedCount() > 0) {
+    statusCharacteristic->setValue(message);
+    statusCharacteristic->notify();
+  }
+}
 
-bool connectWiFi(const char *wifiSsid = ssid,
-                 const char *wifiPassword = password);
-void performUpdate();
-void startBle();
+void resetOta() {
+  if (otaInProgress) {
+    Update.abort();
+  }
+  otaInProgress = false;
+  expectedFirmwareBytes = 0;
+  writtenFirmwareBytes = 0;
+}
 
 class DeskBotServerCallbacks : public BLEServerCallbacks {
   void onDisconnect(BLEServer *server) override { server->startAdvertising(); }
 };
 
-class DeskBotCommandCallbacks : public BLECharacteristicCallbacks {
+class FirmwareDataCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    if (!otaInProgress) {
+      return;
+    }
+
+    // Use the raw buffer: getValue() returns Arduino String in ESP32 core 3.x
+    // and cannot safely represent arbitrary firmware bytes.
+    uint8_t *data = characteristic->getData();
+    const size_t dataLength = characteristic->getLength();
+    const size_t remaining = expectedFirmwareBytes - writtenFirmwareBytes;
+    if (data == nullptr || dataLength == 0 || dataLength > remaining ||
+        Update.write(data, dataLength) != dataLength) {
+      sendStatus("[OTA] Firmware write failed.");
+      resetOta();
+      return;
+    }
+
+    writtenFirmwareBytes += dataLength;
+  }
+};
+
+class CommandCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *characteristic) override {
     String command = characteristic->getValue().c_str();
     command.trim();
-    Serial.printf("[BLE] Received: %s\n", command.c_str());
-    if (command.equalsIgnoreCase("Update")) {
-      performUpdate();
+
+    if (command.startsWith("OTA_BEGIN:")) {
+      resetOta();
+      const size_t imageSize = command.substring(10).toInt();
+      if (imageSize == 0 || !Update.begin(imageSize, U_FLASH)) {
+        sendStatus("[OTA] Cannot start update.");
+        return;
+      }
+      expectedFirmwareBytes = imageSize;
+      writtenFirmwareBytes = 0;
+      otaInProgress = true;
+      sendStatus("[OTA] Receiving firmware.");
+    } else if (command == "OTA_ABORT") {
+      resetOta();
+      sendStatus("[OTA] Cancelled.");
+    } else if (command == "OTA_END") {
+      if (!otaInProgress || writtenFirmwareBytes != expectedFirmwareBytes || !Update.end()) {
+        sendStatus("[OTA] Finalization failed.");
+        resetOta();
+        return;
+      }
+      sendStatus("[OTA] Complete. Restarting.");
+      delay(250);
+      ESP.restart();
     }
   }
 };
 
 void startBle() {
-  BLEDevice::init(device_name.c_str());
+  BLEDevice::init(DEVICE_NAME);
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new DeskBotServerCallbacks());
 
   BLEService *service = bleServer->createService(BLE_SERVICE_UUID);
-  BLECharacteristic *rxCharacteristic = service->createCharacteristic(
-      BLE_RX_UUID,
+  BLECharacteristic *commandCharacteristic = service->createCharacteristic(
+      BLE_COMMAND_UUID,
       BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
-  rxCharacteristic->setCallbacks(new DeskBotCommandCallbacks());
+  // The standard Nordic UART TX characteristic. ESP32-C3's NimBLE stack
+  // automatically provides its writable CCCD descriptor for notifications.
+  statusCharacteristic = service->createCharacteristic(
+      BLE_STATUS_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  BLECharacteristic *firmwareCharacteristic = service->createCharacteristic(
+      BLE_FIRMWARE_UUID, BLECharacteristic::PROPERTY_WRITE);
+  commandCharacteristic->setCallbacks(new CommandCallbacks());
+  firmwareCharacteristic->setCallbacks(new FirmwareDataCallbacks());
   service->start();
 
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(BLE_SERVICE_UUID);
+  advertising->setName(DEVICE_NAME);
   advertising->setScanResponse(true);
   advertising->start();
-  Serial.printf("BLE device \"%s\" is advertising.\n", device_name.c_str());
-}
-
-bool connectWiFi(const char *wifiSsid, const char *wifiPassword) {
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
-  }
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(wifiSsid, wifiPassword);
-  Serial.print("[WiFi] Connecting");
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Connection failed.");
-    return false;
-  }
-
-  Serial.printf("[WiFi] Connected! IP: %s, Gateway: %s\n",
-                WiFi.localIP().toString().c_str(),
-                WiFi.gatewayIP().toString().c_str());
-
-  // Test DNS resolution for GitHub
-  IPAddress resolvedIP;
-  if (!WiFi.hostByName("api.github.com", resolvedIP)) {
-    Serial.println("[WiFi] Warning: Hotspot DNS failed. Setting "
-                   "Google/Cloudflare DNS (8.8.8.8)...");
-    WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
-                IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
-    if (WiFi.hostByName("api.github.com", resolvedIP)) {
-      Serial.printf("[WiFi] DNS resolved via 8.8.8.8: %s\n",
-                    resolvedIP.toString().c_str());
-    } else {
-      Serial.println("[WiFi] Error: Could not resolve api.github.com. Verify "
-                     "mobile data on hotspot.");
-    }
-  } else {
-    Serial.printf("[WiFi] DNS OK. api.github.com: %s\n",
-                  resolvedIP.toString().c_str());
-  }
-
-  return true;
-}
-
-void performUpdate() {
-  Serial.println("\n[OTA] Update triggered via BLE. Starting update...");
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[OTA] Wi-Fi not connected. Connecting...");
-    if (!connectWiFi(ssid, password)) {
-      Serial.println("[OTA] Could not connect to Wi-Fi. Update aborted.");
-      return;
-    }
-  }
-
-  Serial.printf("[OTA] Free heap with BT running: %u bytes (Max contiguous "
-                "block: %u bytes)\n",
-                (unsigned int)ESP.getFreeHeap(),
-                (unsigned int)ESP.getMaxAllocHeap());
-
-  delay(300);
-
-  // Stop BLE before the TLS download. BLE can be recreated if the update fails.
-  BLEDevice::deinit(true);
-  bleServer = nullptr;
-
-  Serial.printf("[OTA] Free heap after stopping BLE: %u bytes (Max contiguous "
-                "block: %u bytes)\n",
-                (unsigned int)ESP.getFreeHeap(),
-                (unsigned int)ESP.getMaxAllocHeap());
-
-  Serial.printf("[OTA] Downloading and installing firmware from: %s\n",
-                DIRECT_FIRMWARE_URL);
-
-  WiFiClientSecure client;
-  client.setInsecure(); // Testing only; validate TLS in production.
-  client.setTimeout(30000);
-
-  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  httpUpdate.rebootOnUpdate(true);
-
-  httpUpdate.onProgress([](int current, int total) {
-    if (total > 0) {
-      Serial.printf("[OTA] Download: %d%%\n", (current * 100) / total);
-    }
-  });
-
-  t_httpUpdate_return result = httpUpdate.update(client, DIRECT_FIRMWARE_URL);
-
-  if (result == HTTP_UPDATE_FAILED) {
-    Serial.printf("[OTA] Error %d: %s\n", httpUpdate.getLastError(),
-                  httpUpdate.getLastErrorString().c_str());
-    startBle();
-  } else if (result == HTTP_UPDATE_NO_UPDATES) {
-    Serial.println("[OTA] No update installed.");
-    startBle();
-  } else if (result == HTTP_UPDATE_OK) {
-    Serial.println("[OTA] Update successful; rebooting.");
-  }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-
-  Serial.println("\n========== DeskBot ==========");
-  Serial.printf("Flash size: %u bytes\n", (unsigned int)ESP.getFlashChipSize());
-  Serial.printf("OTA free space: %u bytes\n",
-                (unsigned int)ESP.getFreeSketchSpace());
-
   startBle();
 }
 

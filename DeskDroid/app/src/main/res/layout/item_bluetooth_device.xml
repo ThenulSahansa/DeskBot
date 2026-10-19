@@ -2,47 +2,79 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:padding="12dp"
+    android:layout_height="64dp"
+    android:background="?android:attr/selectableItemBackground"
     android:gravity="center_vertical"
-    android:background="?selectableItemBackground">
+    android:orientation="horizontal"
+    android:paddingStart="6dp"
+    android:paddingEnd="6dp">
 
-    <ImageView
-        android:layout_width="24dp"
-        android:layout_height="24dp"
-        android:src="@android:drawable/stat_sys_data_bluetooth"
-        app:tint="#00E5FF"
-        android:contentDescription="@string/app_name" />
+    <!-- iOS Circular Bluetooth Badge -->
+    <FrameLayout
+        android:layout_width="38dp"
+        android:layout_height="38dp"
+        android:background="@drawable/bg_ios_glass_pill"
+        android:backgroundTint="#240A84FF">
 
+        <ImageView
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:src="@drawable/ic_ios_bluetooth"
+            app:tint="@color/ios_blue"
+            android:contentDescription="@string/app_name" />
+    </FrameLayout>
+
+    <!-- Device Details -->
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
         android:layout_weight="1"
-        android:orientation="vertical"
-        android:layout_marginStart="12dp">
+        android:orientation="vertical">
 
         <TextView
             android:id="@+id/deviceName"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
+            android:text="DeskBot ESP32"
+            android:textColor="@color/ios_label_primary"
+            android:textSize="15sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/deviceAddress"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#80D8FF"
-            android:textSize="11sp" />
+            android:layout_marginTop="2dp"
+            android:text="AA:BB:CC:DD:EE:FF"
+            android:textColor="@color/ios_label_secondary"
+            android:textSize="12sp" />
     </LinearLayout>
 
+    <!-- Signal / Status Badge -->
     <TextView
         android:id="@+id/deviceStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:textColor="#00E5FF"
-        android:textSize="11sp"
+        android:layout_marginEnd="8dp"
+        android:background="@drawable/bg_ios_glass_pill"
+        android:backgroundTint="#1F30D158"
+        android:paddingStart="8dp"
+        android:paddingTop="3dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="3dp"
+        android:text="BLE"
+        android:textColor="@color/ios_green"
+        android:textSize="10sp"
         android:textStyle="bold" />
+
+    <!-- iOS Chevron Right Accessory -->
+    <ImageView
+        android:layout_width="14dp"
+        android:layout_height="14dp"
+        android:src="@drawable/ic_ios_chevron_right"
+        app:tint="@color/ios_label_tertiary"
+        android:contentDescription="@string/app_name" />
+
 </LinearLayout>

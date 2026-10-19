@@ -1,10 +1,51 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
-    <color name="neon_blue">#FF00E5FF</color>
-    <color name="neon_blue_light">#FF80D8FF</color>
-    <color name="neon_blue_dark">#FF0091EA</color>
-    <color name="neon_red">#FFFF1744</color>
-    <color name="dark_surface">#FF121A24</color>
+    <!-- iOS Base Theme Colors -->
+    <color name="ios_black">#000000</color>
+    <color name="ios_background">#05060A</color>
+    <color name="ios_surface_card">#161820E6</color>
+    <color name="ios_surface_card_secondary">#1F212BE6</color>
+    <color name="ios_surface_glass_rim">#33FFFFFF</color>
+    <color name="ios_surface_glass_subtle_rim">#1AFFFFFF</color>
+    <color name="ios_surface_pressed">#2E3240</color>
+
+    <!-- iOS Dynamic Island -->
+    <color name="ios_dynamic_island_bg">#000000</color>
+    <color name="ios_dynamic_island_border">#28282D</color>
+
+    <!-- iOS System Accent Colors -->
+    <color name="ios_blue">#0A84FF</color>
+    <color name="ios_blue_light">#5AC8FA</color>
+    <color name="ios_blue_dark">#0056B3</color>
+    <color name="ios_blue_glow">#4D0A84FF</color>
+
+    <color name="ios_cyan">#64D2FF</color>
+    <color name="ios_cyan_glow">#5964D2FF</color>
+
+    <color name="ios_green">#30D158</color>
+    <color name="ios_green_glow">#5930D158</color>
+
+    <color name="ios_red">#FF453A</color>
+    <color name="ios_red_glow">#59FF453A</color>
+
+    <color name="ios_orange">#FF9F0A</color>
+    <color name="ios_purple">#BF5AF2</color>
+    <color name="ios_purple_glow">#66BF5AF2</color>
+    <color name="ios_indigo">#5E5CE6</color>
+
+    <!-- iOS Typography & Label Colors -->
+    <color name="ios_label_primary">#FFFFFF</color>
+    <color name="ios_label_secondary">#98989F</color>
+    <color name="ios_label_tertiary">#686872</color>
+    <color name="ios_label_quaternary">#44444C</color>
+    <color name="ios_separator">#1E2028</color>
+
+    <!-- Compatibility Aliases for components referencing legacy tokens -->
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="neon_blue">#0A84FF</color>
+    <color name="neon_blue_light">#64D2FF</color>
+    <color name="neon_blue_dark">#0056B3</color>
+    <color name="neon_red">#FF453A</color>
+    <color name="dark_surface">#161820</color>
 </resources>

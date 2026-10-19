@@ -1,16 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">DeskBot</string>
-    <string name="connect">Connect</string>
-    <string name="connecting">Connecting&#8230;</string>
+    <string name="app_subtitle">Smart Desktop Companion</string>
+    <string name="desk_bot_title">DeskBot</string>
+
+    <!-- Dynamic Island & Connection States -->
+    <string name="island_idle">DeskBot · Disconnected</string>
+    <string name="island_scanning">Scanning for DeskBot…</string>
+    <string name="island_connecting">Pairing with DeskBot…</string>
+    <string name="island_connected">DeskBot · Connected</string>
+    <string name="island_updating">Updating Firmware…</string>
+
+    <!-- Main Hero Actions -->
+    <string name="connect">Connect to DeskBot</string>
+    <string name="connecting">Connecting…</string>
+    <string name="connected">Connected</string>
     <string name="disconnect">Disconnect</string>
-    <string name="check_for_updates">Check for updates</string>
-    <string name="available_bt_devices">Available BT Devices</string>
-    <string name="no_devices_found">No "DeskBot" devices found.\nTap below to scan for nearby DeskBot devices.</string>
-    <string name="scan_for_devices">Scan for Devices</string>
-    <string name="updating_firmware">Updating firmware&#8230;</string>
-    <string name="update_to_version">Update to %1$s</string>
-    <string name="new_update_available">NEW UPDATE AVAILABLE</string>
-    <string name="currently_up_to_date">CURRENTLY UP TO DATE</string>
-    <string name="release_notes_label">Release Notes:</string>
-    <string name="close">Close</string>
+    <string name="connection_ready_hint">Tap to pair via Bluetooth Low Energy</string>
+    <string name="connected_hint">Active hardware link established</string>
+
+    <!-- Telemetry Cards -->
+    <string name="telemetry_header">DESKBOT TELEMETRY</string>
+    <string name="status_label">Status</string>
+    <string name="status_offline">Offline</string>
+    <string name="status_online">Online</string>
+    <string name="signal_label">Link</string>
+    <string name="signal_ready">BLE 5.0</string>
+    <string name="channel_label">MTU</string>
+    <string name="channel_value">23 B</string>
+    <string name="version_label">Firmware</string>
+    <string name="default_version">v1.0.3</string>
+
+    <!-- Updates Section -->
+    <string name="updates_header">SOFTWARE &amp; OTA</string>
+    <string name="check_for_updates">Check for Updates</string>
+    <string name="checking_updates">Checking GitHub Releases…</string>
+    <string name="currently_up_to_date">DeskBot is up to date</string>
+    <string name="new_update_available">Update Available</string>
+    <string name="update_now">Update Now</string>
+    <string name="updating_firmware">Flashing firmware over BLE…</string>
+    <string name="update_to_version">Install %1$s</string>
+    <string name="release_notes_label">Release Notes</string>
+
+    <!-- Modal Device Picker Bottom Sheet -->
+    <string name="nearby_devices_title">Nearby Devices</string>
+    <string name="nearby_devices_subtitle">Select your DeskBot to establish an encrypted BLE link</string>
+    <string name="scan_for_devices">Scan</string>
+    <string name="scanning">Scanning…</string>
+    <string name="no_devices_found">No DeskBot devices discovered.\nEnsure your DeskBot is powered on and within range.</string>
+    <string name="cancel">Cancel</string>
+    <string name="done">Done</string>
+    <string name="close">Dismiss</string>
 </resources>
