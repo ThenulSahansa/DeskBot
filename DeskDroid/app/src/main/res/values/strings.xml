@@ -3,13 +3,14 @@
     <string name="app_name">DeskBot</string>
     <string name="app_subtitle">Smart Desktop Companion</string>
     <string name="desk_bot_title">DeskBot</string>
+    <string name="deskbot_os">DeskBot OS</string>
 
-    <!-- Dynamic Island & Connection States -->
-    <string name="island_idle">DeskBot · Disconnected</string>
-    <string name="island_scanning">Scanning for DeskBot…</string>
-    <string name="island_connecting">Pairing with DeskBot…</string>
-    <string name="island_connected">DeskBot · Connected</string>
-    <string name="island_updating">Updating Firmware…</string>
+    <!-- Connection Status States -->
+    <string name="status_idle">DeskBot · Disconnected</string>
+    <string name="status_scanning">Scanning for DeskBot…</string>
+    <string name="status_connecting">Pairing with DeskBot…</string>
+    <string name="status_connected">DeskBot · Connected</string>
+    <string name="status_updating">Updating Firmware…</string>
 
     <!-- Main Hero Actions -->
     <string name="connect">Connect to DeskBot</string>

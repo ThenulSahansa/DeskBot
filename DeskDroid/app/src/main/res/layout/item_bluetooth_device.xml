@@ -6,22 +6,21 @@
     android:background="?android:attr/selectableItemBackground"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingStart="6dp"
-    android:paddingEnd="6dp">
+    android:paddingStart="8dp"
+    android:paddingEnd="8dp">
 
-    <!-- iOS Circular Bluetooth Badge -->
+    <!-- Flat Bluetooth Badge -->
     <FrameLayout
         android:layout_width="38dp"
         android:layout_height="38dp"
-        android:background="@drawable/bg_ios_glass_pill"
-        android:backgroundTint="#240A84FF">
+        android:background="@drawable/bg_flat_pill">
 
         <ImageView
             android:layout_width="18dp"
             android:layout_height="18dp"
             android:layout_gravity="center"
-            android:src="@drawable/ic_ios_bluetooth"
-            app:tint="@color/ios_blue"
+            android:src="@drawable/ic_bluetooth"
+            app:tint="@color/catppuccin_mauve"
             android:contentDescription="@string/app_name" />
     </FrameLayout>
 
@@ -38,7 +37,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="DeskBot ESP32"
-            android:textColor="@color/ios_label_primary"
+            android:textColor="@color/catppuccin_text"
             android:textSize="15sp"
             android:textStyle="bold" />
 
@@ -48,7 +47,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
             android:text="AA:BB:CC:DD:EE:FF"
-            android:textColor="@color/ios_label_secondary"
+            android:textColor="@color/catppuccin_subtext0"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -58,23 +57,22 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginEnd="8dp"
-        android:background="@drawable/bg_ios_glass_pill"
-        android:backgroundTint="#1F30D158"
-        android:paddingStart="8dp"
+        android:background="@drawable/bg_flat_pill"
+        android:paddingStart="10dp"
         android:paddingTop="3dp"
-        android:paddingEnd="8dp"
+        android:paddingEnd="10dp"
         android:paddingBottom="3dp"
         android:text="BLE"
-        android:textColor="@color/ios_green"
-        android:textSize="10sp"
+        android:textColor="@color/catppuccin_green"
+        android:textSize="11sp"
         android:textStyle="bold" />
 
-    <!-- iOS Chevron Right Accessory -->
+    <!-- Chevron Right -->
     <ImageView
         android:layout_width="14dp"
         android:layout_height="14dp"
-        android:src="@drawable/ic_ios_chevron_right"
-        app:tint="@color/ios_label_tertiary"
+        android:src="@drawable/ic_chevron_right"
+        app:tint="@color/catppuccin_overlay0"
         android:contentDescription="@string/app_name" />
 
 </LinearLayout>

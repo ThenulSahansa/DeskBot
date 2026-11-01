@@ -1,10 +1,6 @@
 package com.example.deskbot
 
 import android.Manifest
-import android.animation.Animator
-import android.animation.AnimatorListenerAdapter
-import android.animation.ArgbEvaluator
-import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -19,38 +15,38 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
-import android.content.BroadcastReceiver
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.graphics.Color
+import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
-import android.util.TypedValue
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
-import android.view.animation.PathInterpolator
 import android.widget.ArrayAdapter
-import android.widget.ImageView
-import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.toColorInt
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import com.example.deskbot.ui.screens.DeskBotMainScreen
+import com.example.deskbot.ui.screens.DeskBotUiState
+import com.example.deskbot.ui.theme.DeskBotTheme
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.Dispatchers
@@ -71,14 +67,14 @@ data class RealBluetoothDeviceItem(
     val name: String,
     val address: String,
     val isBonded: Boolean,
-    val device: BluetoothDevice
+    val device: BluetoothDevice,
+    val isDeskBot: Boolean = false
 )
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
 
     private var isConnected = false
     private var isConnecting = false
-    private var isAnimating = false
 
     // Bluetooth properties
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -91,41 +87,13 @@ class MainActivity : AppCompatActivity() {
     private var pendingWriteLatch: CountDownLatch? = null
     private var pendingWriteSucceeded = false
     private var connectedDevice: BluetoothDevice? = null
+    private var audioCharacteristic: BluetoothGattCharacteristic? = null
+    private var displayCharacteristic: BluetoothGattCharacteristic? = null
+    private var geminiManager: GeminiLiveManager? = null
+    private var isAiSessionActive = false
 
-    // UI references
-    private lateinit var layoutDynamicIsland: LinearLayout
-    private lateinit var ivIslandIcon: ImageView
-    private lateinit var tvIslandTitle: TextView
-    private lateinit var viewIslandDot: View
-    private lateinit var islandProgressBar: ProgressBar
-
-    private lateinit var btnQuickScan: MaterialButton
-    private lateinit var btnMainAction: MaterialButton
-    private lateinit var tvHeroTitle: TextView
-    private lateinit var tvHeroSubtitle: TextView
-    private lateinit var ivHeroRobot: ImageView
-    private lateinit var layoutOrbContainer: View
-
-    private lateinit var tvTelemetryStatus: TextView
-    private lateinit var tvTelemetryRadio: TextView
-    private lateinit var tvTelemetryMtu: TextView
-
-    private lateinit var tvCurrentVersion: TextView
-    private lateinit var tvUpdateStatus: TextView
-    private lateinit var btnCheckUpdates: MaterialButton
-
-    private lateinit var layoutOtaProgress: LinearLayout
-    private lateinit var tvOtaStatusLabel: TextView
-    private lateinit var tvOtaPercentage: TextView
-    private lateinit var progressBarOta: ProgressBar
-
-    private lateinit var layoutReleaseNotesCard: LinearLayout
-    private lateinit var tvReleaseNotesTitle: TextView
-    private lateinit var tvReleaseNotesDate: TextView
-    private lateinit var tvReleaseNotesContent: TextView
-    private lateinit var btnInstallUpdateNow: MaterialButton
-
-    private lateinit var nameDropView: IosNameDropView
+    // Compose UI State
+    private val uiState = mutableStateOf(DeskBotUiState())
 
     // Device picker bottom sheet references
     private var deviceBottomSheetDialog: BottomSheetDialog? = null
@@ -145,11 +113,9 @@ class MainActivity : AppCompatActivity() {
     private val BLE_RX_UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
     private val BLE_STATUS_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private val BLE_FIRMWARE_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
+    private val BLE_AUDIO_UUID = UUID.fromString("6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
+    private val BLE_DISPLAY_UUID = UUID.fromString("6E400006-B5A3-F393-E0A9-E50E24DCCA9E")
     private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
-    // Spring Interpolators
-    private val iosSpringOvershoot = PathInterpolator(0.34f, 1.56f, 0.64f, 1.0f)
-    private val iosEaseInOut = PathInterpolator(0.25f, 0.1f, 0.25f, 1.0f)
 
     // Permission launcher
     private val requestPermissionLauncher = registerForActivityResult(
@@ -174,52 +140,133 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Strict BLE Scan Callback
     private val bleScanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device
-            val advertisedName = device.name ?: result.scanRecord?.deviceName
-            val isDeskBotService = result.scanRecord?.serviceUuids?.any {
-                it.uuid == BLE_SERVICE_UUID
-            } == true
+        override fun onScanResult(callbackType: Int, result: ScanResult?) {
+            result ?: return
+            handleDiscoveredBleDevice(result)
+        }
 
-            val name = advertisedName ?: if (isDeskBotService) "DeskBot" else null
-            if (name != null && realDevicesList.none { it.address == device.address }) {
-                realDevicesList.add(RealBluetoothDeviceItem(name, device.address, device.bondState == BluetoothDevice.BOND_BONDED, device))
+        @SuppressLint("MissingPermission")
+        override fun onBatchScanResults(results: MutableList<ScanResult>?) {
+            results?.forEach { handleDiscoveredBleDevice(it) }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            runOnUiThread {
+                sheetScanProgressBar?.visibility = View.GONE
+                updateConnectionState(ConnectionState.IDLE)
+                val msg = when (errorCode) {
+                    SCAN_FAILED_ALREADY_STARTED -> "Scan already in progress"
+                    SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "BLE registration failed"
+                    SCAN_FAILED_INTERNAL_ERROR -> "BLE internal hardware error"
+                    SCAN_FAILED_FEATURE_UNSUPPORTED -> "BLE scan unsupported"
+                    else -> "BLE scan failed ($errorCode)"
+                }
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleDiscoveredBleDevice(result: ScanResult) {
+        val device = result.device ?: return
+
+        // STRICT REQUIREMENT: Only BLE devices. Exclude Bluetooth Classic (BR/EDR).
+        if (device.type == BluetoothDevice.DEVICE_TYPE_CLASSIC) {
+            return
+        }
+
+        val scanRecord = result.scanRecord
+        val advertisedName = (device.name?.takeIf { it.isNotBlank() }
+            ?: scanRecord?.deviceName?.takeIf { it.isNotBlank() })
+
+        // Check if advertising DeskBot's Nordic UART / OTA BLE Service UUID
+        val hasDeskBotService = scanRecord?.serviceUuids?.any {
+            it.uuid == BLE_SERVICE_UUID || it.uuid.toString().contains("6e400001", ignoreCase = true)
+        } == true
+
+        // Check if raw payload bytes contain "DeskBot" in ASCII
+        val rawBytesMatch = scanRecord?.bytes?.let { bytes ->
+            val deskBotPattern = "DeskBot".toByteArray(Charsets.US_ASCII)
+            bytesContainsSubsequence(bytes, deskBotPattern)
+        } == true
+
+        val isDeskBotName = advertisedName?.contains("DeskBot", ignoreCase = true) == true
+        val isDeskBot = isDeskBotName || hasDeskBotService || rawBytesMatch
+
+        // Determine best display name
+        val displayName = when {
+            advertisedName != null -> advertisedName
+            isDeskBot -> "DeskBot"
+            else -> return // Ignore anonymous beacon spam with no name and no DeskBot service
+        }
+
+        runOnUiThread {
+            val existingIndex = realDevicesList.indexOfFirst {
+                it.address.equals(device.address, ignoreCase = true)
+            }
+
+            if (existingIndex >= 0) {
+                val existing = realDevicesList[existingIndex]
+                val bestName = if (existing.name == "DeskBot" || isDeskBot) {
+                    if (advertisedName != null && advertisedName != "DeskBot") advertisedName else "DeskBot"
+                } else if (advertisedName != null) {
+                    advertisedName
+                } else {
+                    existing.name
+                }
+                val updatedDeskBot = existing.isDeskBot || isDeskBot
+                if (bestName != existing.name || updatedDeskBot != existing.isDeskBot) {
+                    realDevicesList[existingIndex] = existing.copy(
+                        name = bestName,
+                        isDeskBot = updatedDeskBot
+                    )
+                    devicesAdapter?.notifyDataSetChanged()
+                }
+            } else {
+                val newItem = RealBluetoothDeviceItem(
+                    name = displayName,
+                    address = device.address,
+                    isBonded = device.bondState == BluetoothDevice.BOND_BONDED,
+                    device = device,
+                    isDeskBot = isDeskBot
+                )
+
+                if (isDeskBot) {
+                    // Insert before non-DeskBot devices so DeskBot is at the top
+                    val firstNonDeskBotIndex = realDevicesList.indexOfFirst { !it.isDeskBot }
+                    if (firstNonDeskBotIndex >= 0) {
+                        realDevicesList.add(firstNonDeskBotIndex, newItem)
+                    } else {
+                        realDevicesList.add(newItem)
+                    }
+                } else {
+                    realDevicesList.add(newItem)
+                }
                 devicesAdapter?.notifyDataSetChanged()
                 sheetEmptyContainer?.visibility = View.GONE
             }
         }
-
-        override fun onScanFailed(errorCode: Int) {
-            sheetScanProgressBar?.visibility = View.GONE
-        }
     }
 
-    // Disconnection Broadcast Receiver
-    private val bluetoothDisconnectReceiver = object : BroadcastReceiver() {
-        @SuppressLint("MissingPermission")
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                BluetoothDevice.ACTION_ACL_DISCONNECTED,
-                BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED -> {
-                    val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
-
-                    if (connectedDevice != null && (device == null || device.address == connectedDevice?.address)) {
-                        handleBluetoothConnectionLost()
-                    }
+    private fun bytesContainsSubsequence(target: ByteArray, pattern: ByteArray): Boolean {
+        if (pattern.isEmpty() || target.size < pattern.size) return false
+        val maxIdx = target.size - pattern.size
+        for (i in 0..maxIdx) {
+            var match = true
+            for (j in pattern.indices) {
+                if (target[i + j] != pattern[j]) {
+                    match = false
+                    break
                 }
             }
+            if (match) return true
         }
+        return false
     }
 
-    enum class IslandState {
+    enum class ConnectionState {
         IDLE,
         SCANNING,
         CONNECTING,
@@ -230,136 +277,90 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContentView(R.layout.activity_main)
-
-        // Perfect edge-to-edge window insets handling for all mobile phone screens
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.safeContentContainer)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(
-                v.paddingLeft,
-                systemBars.top + (4 * resources.displayMetrics.density).toInt(),
-                v.paddingRight,
-                systemBars.bottom + (8 * resources.displayMetrics.density).toInt()
-            )
-            insets
-        }
 
         val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
 
-        // Register ACL disconnection broadcast receiver
-        val filter = IntentFilter().apply {
-            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
-            addAction(BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED)
-        }
-        registerReceiver(bluetoothDisconnectReceiver, filter)
-
-        initViews()
-        setupListeners()
-    }
-
-    private fun initViews() {
-        layoutDynamicIsland = findViewById(R.id.layoutDynamicIsland)
-        ivIslandIcon = findViewById(R.id.ivIslandIcon)
-        tvIslandTitle = findViewById(R.id.tvIslandTitle)
-        viewIslandDot = findViewById(R.id.viewIslandDot)
-        islandProgressBar = findViewById(R.id.islandProgressBar)
-
-        btnQuickScan = findViewById(R.id.btnQuickScan)
-        btnMainAction = findViewById(R.id.btnMainAction)
-        tvHeroTitle = findViewById(R.id.tvHeroTitle)
-        tvHeroSubtitle = findViewById(R.id.tvHeroSubtitle)
-        ivHeroRobot = findViewById(R.id.ivHeroRobot)
-        layoutOrbContainer = findViewById(R.id.layoutOrbContainer)
-
-        tvTelemetryStatus = findViewById(R.id.tvTelemetryStatus)
-        tvTelemetryRadio = findViewById(R.id.tvTelemetryRadio)
-        tvTelemetryMtu = findViewById(R.id.tvTelemetryMtu)
-
-        tvCurrentVersion = findViewById(R.id.tvCurrentVersion)
-        tvUpdateStatus = findViewById(R.id.tvUpdateStatus)
-        btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
-
-        layoutOtaProgress = findViewById(R.id.layoutOtaProgress)
-        tvOtaStatusLabel = findViewById(R.id.tvOtaStatusLabel)
-        tvOtaPercentage = findViewById(R.id.tvOtaPercentage)
-        progressBarOta = findViewById(R.id.progressBarOta)
-
-        layoutReleaseNotesCard = findViewById(R.id.layoutReleaseNotesCard)
-        tvReleaseNotesTitle = findViewById(R.id.tvReleaseNotesTitle)
-        tvReleaseNotesDate = findViewById(R.id.tvReleaseNotesDate)
-        tvReleaseNotesContent = findViewById(R.id.tvReleaseNotesContent)
-        btnInstallUpdateNow = findViewById(R.id.btnInstallUpdateNow)
-
-        nameDropView = findViewById(R.id.nameDropView)
-    }
-
-    private fun setupListeners() {
-        btnMainAction.setOnClickListener {
-            triggerHapticFeedback()
-            if (isConnecting || isAnimating) return@setOnClickListener
-
-            if (!isConnected) {
-                if (!hasBluetoothPermissions()) {
-                    requestPermissionLauncher.launch(getRequiredBluetoothPermissions())
-                } else {
-                    checkBluetoothAndShowDevices()
-                }
-            } else {
-                disconnectDevice()
+        setContent {
+            DeskBotTheme {
+                DeskBotMainScreen(
+                    state = uiState.value,
+                    onConnectClick = { handleConnectAction() },
+                    onQuickScanClick = { handleQuickScanAction() },
+                    onCheckUpdatesClick = { handleCheckUpdatesAction() },
+                    onInstallUpdateClick = { handleInstallUpdateAction() },
+                    onStatusClick = { handleStatusAction() },
+                    onToggleTerminal = { handleToggleTerminal() },
+                    onToggleAiSession = { handleToggleAiSession() }
+                )
             }
         }
+    }
 
-        btnQuickScan.setOnClickListener {
-            triggerHapticFeedback()
+    private fun handleConnectAction() {
+        triggerHapticFeedback()
+        if (isConnecting) return
+
+        if (!isConnected) {
             if (!hasBluetoothPermissions()) {
                 requestPermissionLauncher.launch(getRequiredBluetoothPermissions())
             } else {
                 checkBluetoothAndShowDevices()
             }
+        } else {
+            disconnectDevice()
+        }
+    }
+
+    private fun handleQuickScanAction() {
+        triggerHapticFeedback()
+        if (!hasBluetoothPermissions()) {
+            requestPermissionLauncher.launch(getRequiredBluetoothPermissions())
+        } else {
+            checkBluetoothAndShowDevices()
+        }
+    }
+
+    private fun handleCheckUpdatesAction() {
+        triggerHapticFeedback()
+        if (!isConnected) {
+            Toast.makeText(this, "Connect to DeskBot via Bluetooth first.", Toast.LENGTH_SHORT).show()
+            return
         }
 
-        btnCheckUpdates.setOnClickListener {
-            triggerHapticFeedback()
-            if (!isConnected) {
-                Toast.makeText(this, "Connect to DeskBot via Bluetooth first.", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            if (isUpdateAvailable) {
-                val targetVersion = latestVersionTag ?: "new version"
-                startBleFirmwareUpdate(targetVersion)
-            } else if (!isUpdateCheckActive) {
-                checkForUpdates()
-            }
-        }
-
-        btnInstallUpdateNow.setOnClickListener {
-            triggerHapticFeedback()
-            if (!isConnected) {
-                Toast.makeText(this, "Connect to DeskBot via Bluetooth first.", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+        if (isUpdateAvailable) {
             val targetVersion = latestVersionTag ?: "new version"
             startBleFirmwareUpdate(targetVersion)
+        } else if (!isUpdateCheckActive) {
+            checkForUpdates()
         }
+    }
 
-        layoutDynamicIsland.setOnClickListener {
-            triggerHapticFeedback()
-            val statusMsg = if (isConnected) {
-                "DeskBot is connected (${connectedDevice?.name ?: "BLE Device"})"
-            } else {
-                "DeskBot is disconnected"
-            }
-            Toast.makeText(this, statusMsg, Toast.LENGTH_SHORT).show()
+    private fun handleInstallUpdateAction() {
+        triggerHapticFeedback()
+        if (!isConnected) {
+            Toast.makeText(this, "Connect to DeskBot via Bluetooth first.", Toast.LENGTH_SHORT).show()
+            return
         }
+        val targetVersion = latestVersionTag ?: "new version"
+        startBleFirmwareUpdate(targetVersion)
+    }
+
+    private fun handleStatusAction() {
+        triggerHapticFeedback()
+        val statusMsg = if (isConnected) {
+            "DeskBot connected (MTU $negotiatedMtu B)"
+        } else {
+            "DeskBot is currently offline"
+        }
+        Toast.makeText(this, statusMsg, Toast.LENGTH_SHORT).show()
     }
 
     private fun triggerHapticFeedback() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val vibrator = getSystemService(VIBRATOR_SERVICE) as? Vibrator
+                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 vibrator?.vibrate(VibrationEffect.createOneShot(18, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 window.decorView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -367,60 +368,23 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
-    private fun updateIslandState(state: IslandState, extraText: String? = null) {
-        when (state) {
-            IslandState.IDLE -> {
-                tvIslandTitle.text = getString(R.string.island_idle)
-                ivIslandIcon.setImageResource(R.drawable.ic_ios_bluetooth)
-                ivIslandIcon.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_blue))
-                viewIslandDot.visibility = View.VISIBLE
-                viewIslandDot.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_label_tertiary))
-                islandProgressBar.visibility = View.GONE
-            }
-            IslandState.SCANNING -> {
-                tvIslandTitle.text = getString(R.string.island_scanning)
-                ivIslandIcon.setImageResource(R.drawable.ic_ios_antenna)
-                ivIslandIcon.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_cyan))
-                viewIslandDot.visibility = View.GONE
-                islandProgressBar.visibility = View.VISIBLE
-            }
-            IslandState.CONNECTING -> {
-                tvIslandTitle.text = getString(R.string.island_connecting)
-                ivIslandIcon.setImageResource(R.drawable.ic_ios_bluetooth)
-                ivIslandIcon.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_cyan))
-                viewIslandDot.visibility = View.GONE
-                islandProgressBar.visibility = View.VISIBLE
-            }
-            IslandState.CONNECTED -> {
-                tvIslandTitle.text = extraText ?: getString(R.string.island_connected)
-                ivIslandIcon.setImageResource(R.drawable.ic_ios_check_circle)
-                ivIslandIcon.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_green))
-                viewIslandDot.visibility = View.VISIBLE
-                viewIslandDot.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_green))
-                islandProgressBar.visibility = View.GONE
-            }
-            IslandState.UPDATING -> {
-                tvIslandTitle.text = extraText ?: getString(R.string.island_updating)
-                ivIslandIcon.setImageResource(R.drawable.ic_ios_arrow_clockwise)
-                ivIslandIcon.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_cyan))
-                viewIslandDot.visibility = View.GONE
-                islandProgressBar.visibility = View.VISIBLE
-            }
+    private fun updateConnectionState(state: ConnectionState, extraText: String? = null) {
+        val label = when (state) {
+            ConnectionState.IDLE -> "DeskBot · Disconnected"
+            ConnectionState.SCANNING -> "Scanning for DeskBot…"
+            ConnectionState.CONNECTING -> "Pairing with DeskBot…"
+            ConnectionState.CONNECTED -> extraText ?: "DeskBot · Connected"
+            ConnectionState.UPDATING -> extraText ?: "Updating Firmware…"
         }
-
-        // Animate island bounce
-        layoutDynamicIsland.scaleX = 0.95f
-        layoutDynamicIsland.scaleY = 0.95f
-        layoutDynamicIsland.animate()
-            .scaleX(1.0f)
-            .scaleY(1.0f)
-            .setDuration(300)
-            .setInterpolator(iosSpringOvershoot)
-            .start()
+        uiState.value = uiState.value.copy(
+            connectionState = state,
+            connectionText = label
+        )
     }
 
     private fun checkBluetoothAndShowDevices() {
-        val adapter = bluetoothAdapter
+        val adapter = bluetoothAdapter ?: (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        bluetoothAdapter = adapter
         if (adapter == null) {
             Toast.makeText(this, "Bluetooth is not supported on this device.", Toast.LENGTH_LONG).show()
             return
@@ -431,13 +395,57 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        showIosDevicePickerSheet()
+        showDevicePickerSheet()
     }
 
     @SuppressLint("MissingPermission")
-    private fun showIosDevicePickerSheet() {
+    private fun loadPairedBleDevices() {
+        if (!hasBluetoothPermissions()) return
+        val adapter = bluetoothAdapter ?: (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        bluetoothAdapter = adapter
+        val bonded = adapter?.bondedDevices ?: return
+
+        for (device in bonded) {
+            // STRICT REQUIREMENT: Only BLE devices. Exclude Bluetooth Classic (BR/EDR).
+            if (device.type == BluetoothDevice.DEVICE_TYPE_CLASSIC) {
+                continue
+            }
+            val devName = device.name?.takeIf { it.isNotBlank() } ?: "Paired BLE Device"
+            val isDeskBot = devName.contains("DeskBot", ignoreCase = true)
+            val item = RealBluetoothDeviceItem(
+                name = devName,
+                address = device.address,
+                isBonded = true,
+                device = device,
+                isDeskBot = isDeskBot
+            )
+
+            val existingIndex = realDevicesList.indexOfFirst {
+                it.address.equals(device.address, ignoreCase = true)
+            }
+            if (existingIndex >= 0) {
+                realDevicesList[existingIndex] = item
+            } else {
+                if (isDeskBot) {
+                    realDevicesList.add(0, item) // Paired DeskBot at top of list
+                } else {
+                    realDevicesList.add(item)
+                }
+            }
+        }
+    }
+
+    private fun isLocationServicesEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return true
+        val lm = getSystemService(LOCATION_SERVICE) as? LocationManager ?: return false
+        return lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+               lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun showDevicePickerSheet() {
         val sheetView = layoutInflater.inflate(R.layout.popup_bluetooth_devices, null)
-        val dialog = BottomSheetDialog(this, R.style.IosBottomSheetDialogTheme)
+        val dialog = BottomSheetDialog(this, R.style.FlatBottomSheetDialogTheme)
         dialog.setContentView(sheetView)
         deviceBottomSheetDialog = dialog
 
@@ -448,17 +456,8 @@ class MainActivity : AppCompatActivity() {
 
         realDevicesList.clear()
 
-        // 1. Load paired BLE devices from Android settings
-        val bondedDevices = bluetoothAdapter?.bondedDevices
-        bondedDevices?.forEach { dev ->
-            val isLeOrDual = dev.type == BluetoothDevice.DEVICE_TYPE_LE || dev.type == BluetoothDevice.DEVICE_TYPE_DUAL || dev.type == BluetoothDevice.DEVICE_TYPE_UNKNOWN
-            if (isLeOrDual) {
-                val name = dev.name ?: "Paired Device (${dev.address.takeLast(5)})"
-                if (realDevicesList.none { it.address == dev.address }) {
-                    realDevicesList.add(RealBluetoothDeviceItem(name, dev.address, isBonded = true, device = dev))
-                }
-            }
-        }
+        // Populate previously paired (bonded) BLE devices immediately
+        loadPairedBleDevices()
 
         devicesAdapter = object : ArrayAdapter<RealBluetoothDeviceItem>(
             this,
@@ -467,10 +466,33 @@ class MainActivity : AppCompatActivity() {
         ) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val view = convertView ?: layoutInflater.inflate(R.layout.item_bluetooth_device, parent, false)
-                val item = getItem(position)
-                view.findViewById<TextView>(R.id.deviceName).text = item?.name
-                view.findViewById<TextView>(R.id.deviceAddress).text = item?.address
-                view.findViewById<TextView>(R.id.deviceStatus).text = if (item?.isBonded == true) "PAIRED" else "BLE"
+                val item = getItem(position) ?: return view
+                view.findViewById<TextView>(R.id.deviceName).text = item.name
+                view.findViewById<TextView>(R.id.deviceAddress).text = item.address
+
+                val statusBadge = view.findViewById<TextView>(R.id.deviceStatus)
+                when {
+                    item.isDeskBot && item.isBonded -> {
+                        statusBadge.text = "PAIRED · DESKBOT"
+                        statusBadge.setTextColor(ContextCompat.getColor(context, R.color.catppuccin_mauve))
+                        statusBadge.backgroundTintList = ColorStateList.valueOf(0x26CBA6F7.toInt())
+                    }
+                    item.isDeskBot -> {
+                        statusBadge.text = "DESKBOT"
+                        statusBadge.setTextColor(ContextCompat.getColor(context, R.color.catppuccin_mauve))
+                        statusBadge.backgroundTintList = ColorStateList.valueOf(0x26CBA6F7.toInt())
+                    }
+                    item.isBonded -> {
+                        statusBadge.text = "PAIRED"
+                        statusBadge.setTextColor(ContextCompat.getColor(context, R.color.catppuccin_blue))
+                        statusBadge.backgroundTintList = ColorStateList.valueOf(0x2689B4FA.toInt())
+                    }
+                    else -> {
+                        statusBadge.text = "BLE"
+                        statusBadge.setTextColor(ContextCompat.getColor(context, R.color.catppuccin_green))
+                        statusBadge.backgroundTintList = ColorStateList.valueOf(0x26A6E3A1.toInt())
+                    }
+                }
                 return view
             }
         }
@@ -492,13 +514,15 @@ class MainActivity : AppCompatActivity() {
 
         btnScan.setOnClickListener {
             triggerHapticFeedback()
+            loadPairedBleDevices()
+            devicesAdapter?.notifyDataSetChanged()
             startBluetoothScan()
         }
 
         dialog.setOnDismissListener {
             stopBluetoothScan()
             if (!isConnected && !isConnecting) {
-                updateIslandState(IslandState.IDLE)
+                updateConnectionState(ConnectionState.IDLE)
             }
         }
 
@@ -509,11 +533,45 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun startBluetoothScan() {
         if (!hasBluetoothPermissions()) return
-        sheetScanProgressBar?.visibility = View.VISIBLE
-        updateIslandState(IslandState.SCANNING)
 
-        // Strict BLE scanning
-        bluetoothLeScanner?.startScan(bleScanCallback)
+        // Always re-acquire adapter and scanner in case Bluetooth was recently enabled
+        val adapter = bluetoothAdapter ?: (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        bluetoothAdapter = adapter
+        if (adapter == null || !adapter.isEnabled) {
+            Toast.makeText(this, "Please enable Bluetooth first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationServicesEnabled()) {
+            Toast.makeText(this, "Please turn on Location to discover nearby BLE devices.", Toast.LENGTH_LONG).show()
+        }
+
+        val scanner = adapter.bluetoothLeScanner
+        bluetoothLeScanner = scanner
+        if (scanner == null) {
+            Toast.makeText(this, "Bluetooth LE Scanner is unavailable.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        sheetScanProgressBar?.visibility = View.VISIBLE
+        updateConnectionState(ConnectionState.SCANNING)
+
+        try {
+            scanner.stopScan(bleScanCallback)
+        } catch (_: Exception) {}
+
+        val scanSettings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0)
+            .build()
+
+        try {
+            scanner.startScan(null, scanSettings, bleScanCallback)
+        } catch (e: Exception) {
+            sheetScanProgressBar?.visibility = View.GONE
+            updateConnectionState(ConnectionState.IDLE)
+            Toast.makeText(this, "Failed to start BLE scan: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -530,21 +588,17 @@ class MainActivity : AppCompatActivity() {
     private fun connectToRealDevice(item: RealBluetoothDeviceItem) {
         val dev = item.device
         isConnecting = true
-        updateIslandState(IslandState.CONNECTING)
+        updateConnectionState(ConnectionState.CONNECTING)
 
-        btnMainAction.text = getString(R.string.connecting)
-        btnMainAction.setIconResource(R.drawable.ic_ios_arrow_clockwise)
-        tvHeroSubtitle.text = "Establishing secure link with ${item.name}…"
+        uiState.value = uiState.value.copy(
+            isConnecting = true,
+            deviceName = item.name
+        )
 
         stopBluetoothScan()
+        activeGatt?.close()
 
-        try {
-            activeGatt?.disconnect()
-            activeGatt?.close()
-        } catch (_: Exception) {}
-        activeGatt = null
-
-        val gattCallback = object : BluetoothGattCallback() {
+        activeGatt = dev.connectGatt(this, false, object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                     gatt.discoverServices()
@@ -565,6 +619,10 @@ class MainActivity : AppCompatActivity() {
                 val rx = service?.getCharacteristic(BLE_RX_UUID)
                 val firmware = service?.getCharacteristic(BLE_FIRMWARE_UUID)
                 val statusChar = service?.getCharacteristic(BLE_STATUS_UUID)
+                val audioChar = service?.getCharacteristic(BLE_AUDIO_UUID)
+                val displayChar = service?.getCharacteristic(BLE_DISPLAY_UUID)
+
+                TerminalLog.log("BLE", "Services discovered (status=$status)", if (status == BluetoothGatt.GATT_SUCCESS) LogLevel.SUCCESS else LogLevel.ERROR)
 
                 if (statusChar != null) {
                     gatt.setCharacteristicNotification(statusChar, true)
@@ -579,23 +637,48 @@ class MainActivity : AppCompatActivity() {
                             gatt.writeDescriptor(descriptor)
                         }
                     }
+                    TerminalLog.log("BLE", "Subscribed to status notifications", LogLevel.INFO)
+                }
+
+                // Subscribe to audio notifications from ESP32
+                if (audioChar != null) {
+                    gatt.setCharacteristicNotification(audioChar, true)
+                    val audioDescriptor = audioChar.getDescriptor(CCCD_UUID)
+                    if (audioDescriptor != null) {
+                        // Queue descriptor write after status descriptor completes
+                        android.os.Handler(mainLooper).postDelayed({
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                gatt.writeDescriptor(audioDescriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                            } else {
+                                @Suppress("DEPRECATION")
+                                audioDescriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                @Suppress("DEPRECATION")
+                                gatt.writeDescriptor(audioDescriptor)
+                            }
+                        }, 500)
+                    }
+                    TerminalLog.log("BLE", "Subscribed to audio notifications", LogLevel.INFO)
                 }
 
                 runOnUiThread {
                     isConnecting = false
-                    if (status == BluetoothGatt.GATT_SUCCESS && (rx != null || service != null)) {
+                    if (status == BluetoothGatt.GATT_SUCCESS && rx != null && firmware != null) {
                         activeGatt = gatt
                         commandCharacteristic = rx
                         firmwareCharacteristic = firmware
+                        audioCharacteristic = audioChar
+                        displayCharacteristic = displayChar
                         connectedDevice = dev
                         gatt.requestMtu(247)
 
-                        tvTelemetryRadio.text = "BLE 5.0"
-                        tvTelemetryRadio.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_cyan))
+                        if (audioChar != null) TerminalLog.log("BLE", "Audio characteristic found", LogLevel.SUCCESS)
+                        if (displayChar != null) TerminalLog.log("BLE", "Display characteristic found", LogLevel.SUCCESS)
+
                         onDeskBotSuccessfullyConnected(item.name)
                     } else {
                         resetToDisconnectedUI()
                         showConnectionErrorNotification(item.name, "DeskBot BLE service was not found")
+                        TerminalLog.log("BLE", "Service discovery failed — missing characteristics", LogLevel.ERROR)
                         gatt.disconnect()
                         gatt.close()
                     }
@@ -607,14 +690,30 @@ class MainActivity : AppCompatActivity() {
                 characteristic: BluetoothGattCharacteristic,
                 value: ByteArray
             ) {
-                if (characteristic.uuid == BLE_STATUS_UUID) {
+                if (characteristic.uuid == BLE_AUDIO_UUID) {
+                    TerminalLog.log("AUDIO", "Received ${value.size} bytes of audio data", LogLevel.INFO)
+                    geminiManager?.sendAudio(value)
+                } else if (characteristic.uuid == BLE_STATUS_UUID) {
                     val statusText = String(value, Charsets.UTF_8).trim()
+                    TerminalLog.log("BLE", "Status: $statusText", LogLevel.INFO)
+
+                    if (statusText.contains("VOICE_START", ignoreCase = true)) {
+                        TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
+                    } else if (statusText.contains("VOICE_END", ignoreCase = true)) {
+                        TerminalLog.log("AUDIO", "Voice input ended — sending end of turn", LogLevel.INFO)
+                        geminiManager?.sendEndOfTurn()
+                    }
+
                     runOnUiThread {
                         if (statusText.contains("Complete", ignoreCase = true) || statusText.contains("Restarting", ignoreCase = true)) {
-                            tvOtaStatusLabel.text = "Update Complete · DeskBot Restarting"
-                            updateIslandState(IslandState.CONNECTED, "DeskBot Restarting…")
+                            uiState.value = uiState.value.copy(
+                                otaStatusLabel = "Update Complete · DeskBot Restarting"
+                            )
+                            updateConnectionState(ConnectionState.CONNECTED, "DeskBot Restarting…")
                         } else if (statusText.contains("Receiving", ignoreCase = true)) {
-                            tvOtaStatusLabel.text = "Flashing firmware to DeskBot…"
+                            uiState.value = uiState.value.copy(
+                                otaStatusLabel = "Flashing firmware to DeskBot…"
+                            )
                         } else if (statusText.contains("failed", ignoreCase = true) || statusText.contains("Cannot", ignoreCase = true)) {
                             Toast.makeText(this@MainActivity, statusText, Toast.LENGTH_SHORT).show()
                         }
@@ -636,7 +735,9 @@ class MainActivity : AppCompatActivity() {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     negotiatedMtu = mtu
                     runOnUiThread {
-                        tvTelemetryMtu.text = "$mtu B"
+                        uiState.value = uiState.value.copy(
+                            telemetryMtu = "$mtu B"
+                        )
                     }
                 }
             }
@@ -651,112 +752,51 @@ class MainActivity : AppCompatActivity() {
                     pendingWriteLatch?.countDown()
                 }
             }
-        }
-
-        // Connect directly via BLE GATT with TRANSPORT_LE for instant, fast BLE connection!
-        activeGatt = @Suppress("DEPRECATION") dev.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        }, BluetoothDevice.TRANSPORT_LE)
     }
 
     /**
      * Triggered on successful Bluetooth connection!
-     * Executes the energized iOS NameDrop wave animation, sound/haptics,
-     * blooms the Dynamic Island, and transitions UI elements with smooth spring physics.
+     * Updates telemetry and state in flat Catppuccin theme.
      */
     private fun onDeskBotSuccessfullyConnected(deviceName: String) {
         isConnected = true
+        isConnecting = false
 
-        // 1. Trigger the Energized iOS NameDrop Animation!
-        val islandLocation = IntArray(2)
-        layoutDynamicIsland.getLocationOnScreen(islandLocation)
-        val dropOriginX = islandLocation[0] + (layoutDynamicIsland.width / 2f)
-        val dropOriginY = islandLocation[1] + (layoutDynamicIsland.height / 2f)
+        TerminalLog.log("BLE", "Connected to $deviceName (MTU $negotiatedMtu B)", LogLevel.SUCCESS)
+        TerminalLog.log("SYSTEM", "DeskBot link established — ready for commands", LogLevel.SUCCESS)
 
-        nameDropView.triggerNameDrop(dropOriginX, dropOriginY) {
-            // Callback when NameDrop completes
-        }
-
-        // 2. Dynamic Island Bloom
-        updateIslandState(IslandState.CONNECTED, "$deviceName Connected")
-
-        // 3. Hero Card Smooth Morph Animation
-        tvHeroTitle.text = deviceName
-        tvHeroSubtitle.text = getString(R.string.connected_hint)
-        ivHeroRobot.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_green))
-        layoutOrbContainer.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#3330D158"))
-
-        // Animate Connect button morphing into Disconnect button
-        animateButtonStateTransition(toConnected = true)
-
-        // 4. Update Telemetry
-        tvTelemetryStatus.text = getString(R.string.status_online)
-        tvTelemetryStatus.setTextColor(ContextCompat.getColor(this, R.color.ios_green))
-        tvTelemetryMtu.text = "$negotiatedMtu B"
-
-        // 5. Hero Card Pulse Bounce
-        findViewById<View>(R.id.cardHeroDevice).apply {
-            scaleX = 0.96f
-            scaleY = 0.96f
-            animate()
-                .scaleX(1.0f)
-                .scaleY(1.0f)
-                .setDuration(450)
-                .setInterpolator(iosSpringOvershoot)
-                .start()
-        }
+        uiState.value = uiState.value.copy(
+            isConnected = true,
+            isConnecting = false,
+            deviceName = deviceName,
+            telemetryStatus = "Online",
+            telemetryRadio = "BLE 5.0",
+            telemetryMtu = "$negotiatedMtu B",
+            connectionState = ConnectionState.CONNECTED,
+            connectionText = "$deviceName Connected"
+        )
 
         Toast.makeText(this, "Connected to $deviceName!", Toast.LENGTH_SHORT).show()
     }
 
-    private fun animateButtonStateTransition(toConnected: Boolean) {
-        isAnimating = true
-        val targetText = if (toConnected) getString(R.string.disconnect) else getString(R.string.connect)
-        val targetIcon = if (toConnected) R.drawable.ic_ios_close else R.drawable.ic_ios_bluetooth
-        val targetBg = if (toConnected) R.drawable.bg_ios_destructive_button else R.drawable.bg_ios_primary_button
-
-        btnMainAction.animate()
-            .scaleX(0.85f)
-            .scaleY(0.85f)
-            .alpha(0.3f)
-            .setDuration(160)
-            .setInterpolator(iosEaseInOut)
-            .setListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    btnMainAction.text = targetText
-                    btnMainAction.setIconResource(targetIcon)
-                    btnMainAction.setBackgroundResource(targetBg)
-                    btnMainAction.iconTint = ColorStateList.valueOf(ContextCompat.getColor(this@MainActivity, R.color.ios_label_primary))
-
-                    btnMainAction.animate()
-                        .scaleX(1.0f)
-                        .scaleY(1.0f)
-                        .alpha(1.0f)
-                        .setDuration(240)
-                        .setInterpolator(iosSpringOvershoot)
-                        .setListener(object : AnimatorListenerAdapter() {
-                            override fun onAnimationEnd(animation: Animator) {
-                                isAnimating = false
-                            }
-                        })
-                        .start()
-                }
-            })
-            .start()
-    }
-
     @SuppressLint("MissingPermission")
     private fun disconnectDevice() {
+        stopAiSession()
         val name = connectedDevice?.name ?: "DeskBot"
         try {
-            activeGatt?.disconnect()
             activeGatt?.close()
         } catch (_: Exception) {}
         activeGatt = null
         commandCharacteristic = null
         firmwareCharacteristic = null
+        audioCharacteristic = null
+        displayCharacteristic = null
         connectedDevice = null
         isConnected = false
         isConnecting = false
 
+        TerminalLog.log("BLE", "Disconnected from $name", LogLevel.INFO)
         resetToDisconnectedUI()
         Toast.makeText(this, "Disconnected from $name", Toast.LENGTH_SHORT).show()
     }
@@ -765,26 +805,23 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         isConnecting = false
 
-        updateIslandState(IslandState.IDLE)
-        tvHeroTitle.text = "DeskBot ESP32"
-        tvHeroSubtitle.text = getString(R.string.connection_ready_hint)
-        ivHeroRobot.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ios_cyan))
-        layoutOrbContainer.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#1A64D2FF"))
-
-        animateButtonStateTransition(toConnected = false)
-
-        tvTelemetryStatus.text = getString(R.string.status_offline)
-        tvTelemetryStatus.setTextColor(ContextCompat.getColor(this, R.color.ios_label_secondary))
-        tvTelemetryMtu.text = "23 B"
-
-        if (isUpdateCheckActive || isUpdateAvailable) {
-            resetUpdateState()
-        }
+        updateConnectionState(ConnectionState.IDLE)
+        uiState.value = uiState.value.copy(
+            isConnected = false,
+            isConnecting = false,
+            deviceName = "DeskBot ESP32",
+            telemetryStatus = "Offline",
+            telemetryMtu = "23 B",
+            isUpdateAvailable = false,
+            isOtaInProgress = false,
+            updateStatus = "Check for Updates"
+        )
     }
 
     private fun handleBluetoothConnectionLost() {
         if (!isConnected && activeGatt == null && connectedDevice == null) return
 
+        stopAiSession()
         @SuppressLint("MissingPermission")
         val devName = connectedDevice?.name ?: "DeskBot"
         try {
@@ -793,8 +830,11 @@ class MainActivity : AppCompatActivity() {
         activeGatt = null
         commandCharacteristic = null
         firmwareCharacteristic = null
+        audioCharacteristic = null
+        displayCharacteristic = null
         connectedDevice = null
 
+        TerminalLog.log("BLE", "Connection lost with $devName", LogLevel.WARN)
         if (isConnected) {
             Toast.makeText(this, "Connection lost with $devName", Toast.LENGTH_SHORT).show()
             resetToDisconnectedUI()
@@ -805,8 +845,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkForUpdates() {
         isUpdateCheckActive = true
-        btnCheckUpdates.text = "…"
-        tvUpdateStatus.text = getString(R.string.checking_updates)
+        uiState.value = uiState.value.copy(
+            updateStatus = "Checking GitHub Releases…"
+        )
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -828,7 +869,7 @@ class MainActivity : AppCompatActivity() {
                     val publishedAt = json.optString("published_at", "").trim()
 
                     val formattedDate = parsePublishedDate(publishedAt)
-                    val currentVersionTag = tvCurrentVersion.text.toString().trim()
+                    val currentVersionTag = uiState.value.currentVersion.trim()
                     val hasHigherVersion = latestTagName.isNotEmpty() && isHigherVersion(latestTagName, currentVersionTag)
 
                     withContext(Dispatchers.Main) {
@@ -837,47 +878,34 @@ class MainActivity : AppCompatActivity() {
                         if (hasHigherVersion) {
                             latestVersionTag = latestTagName
                             isUpdateAvailable = true
-                            tvUpdateStatus.text = getString(R.string.new_update_available)
-                            tvUpdateStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_orange))
-
-                            btnCheckUpdates.text = "Update"
-                            btnCheckUpdates.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_orange))
-
-                            // Show release notes card with smooth spring slide-down
-                            layoutReleaseNotesCard.visibility = View.VISIBLE
-                            layoutReleaseNotesCard.alpha = 0f
-                            layoutReleaseNotesCard.translationY = -20f
-                            layoutReleaseNotesCard.animate()
-                                .alpha(1f)
-                                .translationY(0f)
-                                .setDuration(350)
-                                .setInterpolator(iosSpringOvershoot)
-                                .start()
-
-                            tvReleaseNotesTitle.text = "DeskBot $latestTagName Available"
-                            tvReleaseNotesDate.text = "Released: $formattedDate"
-                            tvReleaseNotesContent.text = if (releaseBody.isNotEmpty()) releaseBody else "Bug fixes and performance improvements for DeskBot."
-                            btnInstallUpdateNow.text = getString(R.string.update_to_version, latestTagName)
+                            uiState.value = uiState.value.copy(
+                                isUpdateAvailable = true,
+                                latestVersionTag = latestTagName,
+                                releaseDate = formattedDate,
+                                releaseNotes = if (releaseBody.isNotEmpty()) releaseBody else "Bug fixes and performance improvements for DeskBot.",
+                                updateStatus = "Update Available"
+                            )
                         } else {
-                            tvUpdateStatus.text = getString(R.string.currently_up_to_date)
-                            tvUpdateStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_green))
-                            btnCheckUpdates.text = "✓"
-                            btnCheckUpdates.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_green))
-                            layoutReleaseNotesCard.visibility = View.GONE
+                            uiState.value = uiState.value.copy(
+                                isUpdateAvailable = false,
+                                updateStatus = "DeskBot is up to date"
+                            )
                         }
                     }
                 } else {
                     withContext(Dispatchers.Main) {
                         isUpdateCheckActive = false
-                        tvUpdateStatus.text = "Check failed ($responseCode)"
-                        btnCheckUpdates.text = "Retry"
+                        uiState.value = uiState.value.copy(
+                            updateStatus = "Check failed ($responseCode)"
+                        )
                     }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     isUpdateCheckActive = false
-                    tvUpdateStatus.text = "Network error"
-                    btnCheckUpdates.text = "Retry"
+                    uiState.value = uiState.value.copy(
+                        updateStatus = "Network error"
+                    )
                 }
             }
         }
@@ -890,17 +918,6 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             publishedAt
         }
-    }
-
-    private fun resetUpdateState() {
-        layoutReleaseNotesCard.visibility = View.GONE
-        layoutOtaProgress.visibility = View.GONE
-        isUpdateCheckActive = false
-        isUpdateAvailable = false
-        btnCheckUpdates.text = "Check"
-        btnCheckUpdates.setTextColor(ContextCompat.getColor(this, R.color.ios_blue))
-        tvUpdateStatus.text = getString(R.string.check_for_updates)
-        tvUpdateStatus.setTextColor(ContextCompat.getColor(this, R.color.ios_label_secondary))
     }
 
     private fun isHigherVersion(latestTag: String, currentTag: String): Boolean {
@@ -923,23 +940,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun startBleFirmwareUpdate(targetVersion: String) {
         isFirmwareUpdateInProgress = true
-        btnCheckUpdates.isEnabled = false
-        btnInstallUpdateNow.isEnabled = false
-
-        layoutOtaProgress.visibility = View.VISIBLE
-        progressBarOta.progress = 0
-        tvOtaPercentage.text = "0%"
-        tvOtaStatusLabel.text = getString(R.string.updating_firmware)
-
-        updateIslandState(IslandState.UPDATING, "Updating DeskBot 0%")
+        uiState.value = uiState.value.copy(
+            isOtaInProgress = true,
+            otaPercentage = 0,
+            otaStatusLabel = "Flashing firmware over BLE…"
+        )
+        updateConnectionState(ConnectionState.UPDATING, "Updating DeskBot 0%")
 
         lifecycleScope.launch(Dispatchers.IO) {
             var firmware: File? = null
             try {
                 firmware = downloadFirmware()
                 val downloadedFirmware = requireNotNull(firmware)
-
-                // BLE GATT OTA
                 val gatt = activeGatt ?: error("DeskBot disconnected")
                 val command = commandCharacteristic ?: error("DeskBot OTA command channel is unavailable")
                 val data = firmwareCharacteristic ?: error("DeskBot OTA data channel is unavailable")
@@ -961,9 +973,10 @@ class MainActivity : AppCompatActivity() {
                         sent += count
                         val percent = (sent * 100 / downloadedFirmware.length()).toInt()
                         withContext(Dispatchers.Main) {
-                            progressBarOta.progress = percent
-                            tvOtaPercentage.text = "$percent%"
-                            updateIslandState(IslandState.UPDATING, "Updating DeskBot $percent%")
+                            uiState.value = uiState.value.copy(
+                                otaPercentage = percent
+                            )
+                            updateConnectionState(ConnectionState.UPDATING, "Updating DeskBot $percent%")
                         }
                     }
                 }
@@ -972,15 +985,14 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 withContext(Dispatchers.Main) {
-                    tvCurrentVersion.text = targetVersion
-                    tvUpdateStatus.text = getString(R.string.currently_up_to_date)
-                    tvUpdateStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_green))
-                    updateIslandState(IslandState.CONNECTED, "DeskBot Updated!")
+                    uiState.value = uiState.value.copy(
+                        currentVersion = targetVersion,
+                        updateStatus = "DeskBot is up to date",
+                        isOtaInProgress = false,
+                        isUpdateAvailable = false
+                    )
+                    updateConnectionState(ConnectionState.CONNECTED, "DeskBot Updated!")
                     Toast.makeText(this@MainActivity, "Update successful. DeskBot is restarting.", Toast.LENGTH_LONG).show()
-
-                    btnCheckUpdates.isEnabled = true
-                    btnInstallUpdateNow.isEnabled = true
-                    resetUpdateState()
                 }
             } catch (e: Exception) {
                 activeGatt?.let { gatt ->
@@ -989,11 +1001,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 withContext(Dispatchers.Main) {
-                    btnCheckUpdates.isEnabled = true
-                    btnInstallUpdateNow.isEnabled = true
-                    tvUpdateStatus.text = "Update failed: ${e.message}"
-                    tvUpdateStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.ios_red))
-                    layoutOtaProgress.visibility = View.GONE
+                    uiState.value = uiState.value.copy(
+                        isOtaInProgress = false,
+                        updateStatus = "Update failed: ${e.message}"
+                    )
                     Toast.makeText(this@MainActivity, e.message ?: "Firmware update failed", Toast.LENGTH_LONG).show()
                 }
             } finally {
@@ -1092,7 +1103,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val builder = NotificationCompat.Builder(this, channelId)
-            .setSmallIcon(R.drawable.ic_ios_bluetooth)
+            .setSmallIcon(R.drawable.ic_bluetooth)
             .setContentTitle("Bluetooth Connection Failed")
             .setContentText("Could not connect to $deviceName")
             .setStyle(NotificationCompat.BigTextStyle().bigText("Failed to connect to $deviceName.\nReason: $errorDetails"))
@@ -1104,10 +1115,100 @@ class MainActivity : AppCompatActivity() {
         } catch (_: SecurityException) {}
     }
 
+    private fun handleToggleTerminal() {
+        triggerHapticFeedback()
+        val newState = !uiState.value.isTerminalVisible
+        uiState.value = uiState.value.copy(isTerminalVisible = newState)
+        TerminalLog.log("SYSTEM", "Terminal visibility changed: ${if (newState) "shown" else "hidden"}", LogLevel.INFO)
+    }
+
+    private fun handleToggleAiSession() {
+        triggerHapticFeedback()
+        if (isAiSessionActive) {
+            stopAiSession()
+        } else {
+            startAiSession()
+        }
+    }
+
+    private fun startAiSession() {
+        if (GeminiLiveManager.API_KEY == "YOUR_GEMINI_API_KEY") {
+            Toast.makeText(this, "Please configure your Gemini API Key in GeminiLiveManager.kt", Toast.LENGTH_LONG).show()
+            TerminalLog.log("GEMINI", "Warning: API key is set to default placeholder in GeminiLiveManager.kt", LogLevel.WARN)
+        }
+
+        TerminalLog.log("GEMINI", "Starting AI Voice Assistant session…", LogLevel.INFO)
+        isAiSessionActive = true
+        uiState.value = uiState.value.copy(isAiSessionActive = true)
+
+        geminiManager?.disconnect()
+        geminiManager = GeminiLiveManager(
+            onResponse = { responseText ->
+                runOnUiThread {
+                    uiState.value = uiState.value.copy(lastGeminiResponse = responseText)
+                }
+                sendTextToDisplay(responseText)
+            },
+            onSetupComplete = {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Gemini Live Ready!", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onError = { errorMsg ->
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Gemini Error: $errorMsg", Toast.LENGTH_SHORT).show()
+                    stopAiSession()
+                }
+            }
+        )
+        geminiManager?.connect()
+    }
+
+    private fun stopAiSession() {
+        if (!isAiSessionActive && geminiManager == null) return
+        TerminalLog.log("GEMINI", "Stopping AI Voice Assistant session", LogLevel.INFO)
+        geminiManager?.disconnect()
+        geminiManager = null
+        isAiSessionActive = false
+        uiState.value = uiState.value.copy(isAiSessionActive = false)
+    }
+
+    private fun sendTextToDisplay(text: String) {
+        val gatt = activeGatt
+        val displayChar = displayCharacteristic
+        if (gatt == null || displayChar == null) {
+            TerminalLog.log("DISPLAY", "Cannot send text: DeskBot not connected or display characteristic unavailable", LogLevel.WARN)
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // Suffix with DISPLAY_END marker so firmware knows the message is complete
+                val messageWithEndMarker = "$text\nDISPLAY_END"
+                val bytes = messageWithEndMarker.toByteArray(Charsets.UTF_8)
+                val chunkSize = min(240, (negotiatedMtu - 3).coerceAtLeast(20))
+                var offset = 0
+                while (offset < bytes.size) {
+                    val end = min(offset + chunkSize, bytes.size)
+                    val chunk = bytes.copyOfRange(offset, end)
+                    val success = writeCharacteristicBlocking(gatt, displayChar, chunk)
+                    if (!success) {
+                        TerminalLog.log("DISPLAY", "Failed to write chunk to OLED display", LogLevel.ERROR)
+                        break
+                    }
+                    offset = end
+                }
+                TerminalLog.log("DISPLAY", "Sent response to DeskBot OLED (${bytes.size} B)", LogLevel.SUCCESS)
+            } catch (e: Exception) {
+                TerminalLog.log("DISPLAY", "Error sending text to OLED: ${e.message}", LogLevel.ERROR)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        stopAiSession()
         try {
-            unregisterReceiver(bluetoothDisconnectReceiver)
             stopBluetoothScan()
             activeGatt?.close()
         } catch (_: Exception) {}

@@ -1,35 +1,35 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- iOS Liquid Glass DayNight Theme -->
+    <!-- Flat Catppuccin Base Theme -->
     <style name="Base.Theme.DeskBot" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- iOS Color System -->
-        <item name="colorPrimary">@color/ios_blue</item>
-        <item name="colorOnPrimary">@color/ios_label_primary</item>
-        <item name="colorSecondary">@color/ios_cyan</item>
-        <item name="colorSurface">@color/ios_background</item>
-        <item name="colorOnSurface">@color/ios_label_primary</item>
+        <!-- Catppuccin Color System -->
+        <item name="colorPrimary">@color/catppuccin_mauve</item>
+        <item name="colorOnPrimary">@color/catppuccin_crust</item>
+        <item name="colorSecondary">@color/catppuccin_blue</item>
+        <item name="colorSurface">@color/catppuccin_surface0</item>
+        <item name="colorOnSurface">@color/catppuccin_text</item>
 
-        <!-- System Bars for true Edge-To-Edge Experience -->
-        <item name="android:windowBackground">@color/ios_black</item>
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- System Bars -->
+        <item name="android:windowBackground">@color/catppuccin_base</item>
+        <item name="android:statusBarColor">@color/catppuccin_base</item>
+        <item name="android:navigationBarColor">@color/catppuccin_base</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
         <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
 
         <!-- Ripple effects -->
-        <item name="colorControlHighlight">#26FFFFFF</item>
+        <item name="colorControlHighlight">#1FCBA6F7</item>
     </style>
 
     <style name="Theme.DeskBot" parent="Base.Theme.DeskBot" />
 
-    <!-- iOS BottomSheet Dialog Style -->
-    <style name="IosBottomSheetDialogTheme" parent="Theme.Design.BottomSheetDialog">
-        <item name="bottomSheetStyle">@style/IosBottomSheetStyle</item>
+    <!-- Flat Catppuccin BottomSheet Dialog Style -->
+    <style name="FlatBottomSheetDialogTheme" parent="Theme.Design.BottomSheetDialog">
+        <item name="bottomSheetStyle">@style/FlatBottomSheetStyle</item>
         <item name="android:windowIsFloating">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/catppuccin_mantle</item>
     </style>
 
-    <style name="IosBottomSheetStyle" parent="Widget.Design.BottomSheet.Modal">
+    <style name="FlatBottomSheetStyle" parent="Widget.Design.BottomSheet.Modal">
         <item name="android:background">@android:color/transparent</item>
     </style>
 </resources>
