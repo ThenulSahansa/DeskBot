@@ -614,6 +614,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Counter to throttle audio packet logs so TerminalLog doesn't flood & crash Compose UI
+            private var receivedAudioPacketCount = 0
+
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 val service = gatt.getService(BLE_SERVICE_UUID)
                 val rx = service?.getCharacteristic(BLE_RX_UUID)
@@ -627,30 +630,16 @@ class MainActivity : ComponentActivity() {
                 audioCharacteristic = audioChar
                 displayCharacteristic = displayChar
 
-                if (audioChar != null) TerminalLog.log("BLE", "Audio characteristic found", LogLevel.SUCCESS)
-                if (displayChar != null) TerminalLog.log("BLE", "Display characteristic found", LogLevel.SUCCESS)
-
-                // Enable local Android notifications immediately for statusChar
-                if (statusChar != null) {
-                    gatt.setCharacteristicNotification(statusChar, true)
-                    val descriptor = statusChar.getDescriptor(CCCD_UUID)
-                    if (descriptor != null) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                            @Suppress("DEPRECATION")
-                            gatt.writeDescriptor(descriptor)
-                        }
-                    }
+                runOnUiThread {
+                    if (audioChar != null) TerminalLog.log("BLE", "Audio characteristic found", LogLevel.SUCCESS)
+                    if (displayChar != null) TerminalLog.log("BLE", "Display characteristic found", LogLevel.SUCCESS)
                 }
 
-                // Schedule audioChar CCCD descriptor write on main looper after 500ms
-                if (audioChar != null) {
-                    gatt.setCharacteristicNotification(audioChar, true)
-                    android.os.Handler(mainLooper).postDelayed({
-                        val descriptor = audioChar.getDescriptor(CCCD_UUID)
+                // 1. Enable local notifications for statusChar
+                if (statusChar != null) {
+                    try {
+                        gatt.setCharacteristicNotification(statusChar, true)
+                        val descriptor = statusChar.getDescriptor(CCCD_UUID)
                         if (descriptor != null) {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
@@ -660,14 +649,40 @@ class MainActivity : ComponentActivity() {
                                 @Suppress("DEPRECATION")
                                 gatt.writeDescriptor(descriptor)
                             }
-                            TerminalLog.log("BLE", "Subscribed to Audio stream notifications", LogLevel.SUCCESS)
                         }
+                    } catch (_: Exception) {}
+                }
+
+                // 2. Schedule audioChar CCCD descriptor write on main looper after 500ms
+                if (audioChar != null) {
+                    try {
+                        gatt.setCharacteristicNotification(audioChar, true)
+                    } catch (_: Exception) {}
+                    android.os.Handler(mainLooper).postDelayed({
+                        if (!isConnected || activeGatt !== gatt) return@postDelayed
+                        try {
+                            val descriptor = audioChar.getDescriptor(CCCD_UUID)
+                            if (descriptor != null) {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                    @Suppress("DEPRECATION")
+                                    gatt.writeDescriptor(descriptor)
+                                }
+                                TerminalLog.log("BLE", "Subscribed to Audio stream notifications", LogLevel.SUCCESS)
+                            }
+                        } catch (_: Exception) {}
                     }, 500)
                 }
 
-                // Request MTU after descriptor writes complete
+                // 3. Request MTU after descriptor writes complete
                 android.os.Handler(mainLooper).postDelayed({
-                    gatt.requestMtu(247)
+                    if (!isConnected || activeGatt !== gatt) return@postDelayed
+                    try {
+                        gatt.requestMtu(247)
+                    } catch (_: Exception) {}
                 }, 900)
 
                 runOnUiThread {
@@ -675,34 +690,15 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            override fun onDescriptorWrite(
-                gatt: BluetoothGatt,
-                descriptor: BluetoothGattDescriptor,
-                status: Int
-            ) {
-                val charUuid = descriptor.characteristic.uuid
+            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    TerminalLog.log("BLE", "Notifications enabled for $charUuid", LogLevel.SUCCESS)
-                } else {
-                    TerminalLog.log("BLE", "Failed to enable notifications for $charUuid (status=$status)", LogLevel.ERROR)
-                }
-
-                // STEP 3 of sequential GATT setup: Once BLE_STATUS_UUID CCCD write finishes,
-                // enable notifications on BLE_AUDIO_UUID, then auto-start the Gemini Live session.
-                if (charUuid == BLE_STATUS_UUID) {
-                    val audioChar = audioCharacteristic
-                    if (audioChar != null) {
-                        enableNotification(gatt, audioChar)
-                    }
-                } else if (charUuid == BLE_AUDIO_UUID) {
+                    negotiatedMtu = mtu
                     runOnUiThread {
-                        if (!isAiSessionActive) {
-                            startAiSession()
-                        }
+                        TerminalLog.log("BLE", "Negotiated MTU: $mtu bytes", LogLevel.SUCCESS)
+                        uiState.value = uiState.value.copy(telemetryMtu = "$mtu B")
                     }
                 }
             }
-
 
             override fun onCharacteristicChanged(
                 gatt: BluetoothGatt,
@@ -714,29 +710,47 @@ class MainActivity : ComponentActivity() {
                     if (value.size <= 16) {
                         val marker = String(value, Charsets.UTF_8).trim()
                         if (marker.contains("VOICE_START", ignoreCase = true)) {
-                            TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
+                            receivedAudioPacketCount = 0
+                            runOnUiThread {
+                                TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
+                            }
+                            geminiManager?.sendStartOfTurn()
                             return
                         } else if (marker.contains("VOICE_END", ignoreCase = true)) {
-                            TerminalLog.log("AUDIO", "Voice input ended – sending end of turn", LogLevel.INFO)
+                            val totalPackets = receivedAudioPacketCount
+                            receivedAudioPacketCount = 0
+                            runOnUiThread {
+                                TerminalLog.log("AUDIO", "Voice input ended ($totalPackets packets) – sending end of turn", LogLevel.INFO)
+                            }
                             geminiManager?.sendEndOfTurn()
                             return
                         }
                     }
 
-                    TerminalLog.log("AUDIO", "Received ${value.size} bytes of audio data", LogLevel.INFO)
-                    if (!isAiSessionActive || geminiManager == null) {
-                        TerminalLog.log("AUDIO", "AI session not started – tap 'Start' in Voice AI", LogLevel.WARN)
-                        return
+                    receivedAudioPacketCount++
+                    // Log only on the 1st packet and every 25th packet on the UI thread to prevent
+                    // background Binder thread ConcurrentModificationException crashes in TerminalLog!
+                    if (receivedAudioPacketCount == 1 || receivedAudioPacketCount % 25 == 0) {
+                        val countSnapshot = receivedAudioPacketCount
+                        val byteSize = value.size
+                        runOnUiThread {
+                            TerminalLog.log("AUDIO", "Streaming audio chunk #$countSnapshot ($byteSize B)", LogLevel.INFO)
+                        }
                     }
-                    geminiManager?.sendAudio(value)
+
+                    if (isAiSessionActive) {
+                        geminiManager?.sendAudio(value)
+                    }
                 } else if (characteristic.uuid == BLE_STATUS_UUID) {
                     val statusText = String(value, Charsets.UTF_8).trim()
-                    TerminalLog.log("BLE", "Status: $statusText", LogLevel.INFO)
+                    runOnUiThread {
+                        TerminalLog.log("BLE", "Status: $statusText", LogLevel.INFO)
+                    }
 
                     if (statusText.contains("VOICE_START", ignoreCase = true)) {
-                        TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
+                        receivedAudioPacketCount = 0
+                        geminiManager?.sendStartOfTurn()
                     } else if (statusText.contains("VOICE_END", ignoreCase = true)) {
-                        TerminalLog.log("AUDIO", "Voice input ended – sending end of turn", LogLevel.INFO)
                         geminiManager?.sendEndOfTurn()
                     }
                 }
@@ -750,28 +764,6 @@ class MainActivity : ComponentActivity() {
                 @Suppress("DEPRECATION")
                 val value = characteristic.value ?: return
                 onCharacteristicChanged(gatt, characteristic, value)
-            }
-
-            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    negotiatedMtu = mtu
-                    TerminalLog.log("BLE", "Negotiated MTU: $mtu bytes", LogLevel.SUCCESS)
-                    runOnUiThread {
-                        uiState.value = uiState.value.copy(telemetryMtu = "$mtu B")
-                    }
-                }
-            }
-            private fun enableNotification(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-                gatt.setCharacteristicNotification(characteristic, true)
-                val descriptor = characteristic.getDescriptor(CCCD_UUID) ?: return
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                } else {
-                    @Suppress("DEPRECATION")
-                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(descriptor)
-                }
             }
 
             override fun onCharacteristicWrite(

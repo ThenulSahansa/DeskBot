@@ -22,12 +22,14 @@ I2SClass microphone;
 #define SCREEN_HEIGHT 64 // Change to 32 if using a 128x32 display
 #define OLED_RESET   -1
 
-// --- Audio Configuration ---
-#define AUDIO_SAMPLE_RATE  16000
-#define I2S_BUFFER_SAMPLES 256
-#define BLE_AUDIO_CHUNK    240   // Max bytes per BLE notify (~120 16-bit samples)
-#define VAD_RMS_THRESHOLD  500
-#define SILENCE_TIMEOUT_MS 600
+// --- Audio & VAD Configuration ---
+#define AUDIO_SAMPLE_RATE     16000
+#define I2S_BUFFER_SAMPLES    256
+#define BLE_AUDIO_CHUNK       240   // Max bytes per BLE notify (120 16-bit samples)
+#define VAD_RMS_THRESHOLD     350   // AC RMS threshold after DC-offset removal
+#define SILENCE_TIMEOUT_MS    650   // Silence duration to mark end of speech
+#define MAX_VOICE_DURATION_MS 6000  // Hard cap (6s) so mic never streams forever
+#define POST_TURN_COOLDOWN_MS 1500  // Pause mic for 1.5s after VOICE_END while waiting for reply
 
 // --- I2S read buffer (32-bit from INMP441) ---
 int32_t i2sReadBuffer[I2S_BUFFER_SAMPLES];
@@ -54,7 +56,10 @@ size_t writtenFirmwareBytes = 0;
 
 // --- Voice activity detection state ---
 bool isVoiceActive = false;
+unsigned long voiceStartTimeMs = 0;
 unsigned long lastVoiceTimeMs = 0;
+unsigned long cooldownUntilMs = 0;
+double noiseFloorRms = 50.0;
 
 // --- BLE connection state ---
 bool bleConnected = false;
@@ -143,7 +148,6 @@ void sendStatus(const char *message) {
       statusCharacteristic->setValue(message);
       statusCharacteristic->notify();
     }
-    // Also send VOICE_START / VOICE_END markers over audioCharacteristic as fallback
     if (audioCharacteristic != nullptr &&
         (strncmp(message, "VOICE_", 6) == 0)) {
       audioCharacteristic->setValue((uint8_t *)message, strlen(message));
@@ -170,6 +174,8 @@ void resetOta() {
 class DeskBotServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *server) override {
     bleConnected = true;
+    isVoiceActive = false;
+    cooldownUntilMs = millis() + 2000; // Wait 2s after BLE connect before enabling VAD
     queueDisplayText("Connected!");
     Serial.println("BLE client connected.");
   }
@@ -282,15 +288,12 @@ void startBle() {
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new DeskBotServerCallbacks());
 
-  // Allocate 30 handles for characteristics + descriptors
   BLEService *service = bleServer->createService(BLEUUID(String(BLE_SERVICE_UUID)), 30);
 
-  // Command characteristic (WRITE) - receives OTA commands, etc.
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       BLE_COMMAND_UUID,
       BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
 
-  // Status characteristic (READ + NOTIFY)
   statusCharacteristic = service->createCharacteristic(
       BLE_STATUS_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
@@ -300,11 +303,9 @@ void startBle() {
   statusCharacteristic->addDescriptor(status2902);
 #endif
 
-  // Firmware data characteristic (WRITE) - receives OTA binary chunks
   BLECharacteristic *firmwareCharacteristic = service->createCharacteristic(
       BLE_FIRMWARE_UUID, BLECharacteristic::PROPERTY_WRITE);
 
-  // Audio characteristic (READ + NOTIFY) - sends 16-bit PCM audio chunks
   audioCharacteristic = service->createCharacteristic(
       BLE_AUDIO_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
@@ -314,12 +315,10 @@ void startBle() {
   audioCharacteristic->addDescriptor(audio2902);
 #endif
 
-  // Display text characteristic (WRITE) - receives text to show on OLED
   displayCharacteristic = service->createCharacteristic(
       BLE_DISPLAY_UUID,
       BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
 
-  // Set callbacks
   commandCharacteristic->setCallbacks(new CommandCallbacks());
   firmwareCharacteristic->setCallbacks(new FirmwareDataCallbacks());
   displayCharacteristic->setCallbacks(new DisplayTextCallbacks());
@@ -334,10 +333,29 @@ void startBle() {
 }
 
 // =========================================================
-// Audio Processing & BLE Transmission
+// Audio Processing & BLE Transmission (with DC Offset Removal)
 // =========================================================
+void sendAudioBufferOverBle(size_t samplesRead) {
+  if (!bleConnected || audioCharacteristic == nullptr) {
+    return;
+  }
+  size_t totalBytes = samplesRead * sizeof(int16_t);
+  size_t offset = 0;
+  while (offset < totalBytes) {
+    size_t chunkSize = totalBytes - offset;
+    if (chunkSize > BLE_AUDIO_CHUNK) {
+      chunkSize = BLE_AUDIO_CHUNK;
+    }
+    audioCharacteristic->setValue((uint8_t *)audioSendBuffer + offset, chunkSize);
+    audioCharacteristic->notify();
+    offset += chunkSize;
+    if (offset < totalBytes) {
+      delay(4);
+    }
+  }
+}
+
 void processAudio() {
-  // Read I2S samples (32-bit from INMP441)
   size_t bytesRead = microphone.readBytes(
       (char *)i2sReadBuffer, sizeof(i2sReadBuffer));
   size_t samplesRead = bytesRead / sizeof(int32_t);
@@ -346,68 +364,73 @@ void processAudio() {
     return;
   }
 
-  // Convert 32-bit to 16-bit and calculate RMS (same >> 16 scale as original)
+  // Do not process or stream audio until BLE is connected
+  if (!bleConnected) {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (now < cooldownUntilMs) {
+    return;
+  }
+
+  // PASS 1: Compute DC offset (mean of block) so INMP441 static DC bias
+  // does not falsely keep RMS above VAD_RMS_THRESHOLD in silence!
+  int64_t sum = 0;
+  for (size_t i = 0; i < samplesRead; i++) {
+    int16_t raw16 = (int16_t)(i2sReadBuffer[i] >> 16);
+    audioSendBuffer[i] = raw16;
+    sum += raw16;
+  }
+  int16_t dcOffset = (int16_t)(sum / (int64_t)samplesRead);
+
+  // PASS 2: Subtract DC offset and compute true AC voice RMS
   int64_t sumSquares = 0;
   for (size_t i = 0; i < samplesRead; i++) {
-    int16_t sample16 = (int16_t)(i2sReadBuffer[i] >> 16);
-    audioSendBuffer[i] = sample16;
-    sumSquares += (int64_t)sample16 * (int64_t)sample16;
+    int32_t centered = (int32_t)audioSendBuffer[i] - (int32_t)dcOffset;
+    // Apply 2x gain (+6 dB) to AC speech signal with clamping
+    centered *= 2;
+    if (centered > 32767) centered = 32767;
+    if (centered < -32768) centered = -32768;
+    audioSendBuffer[i] = (int16_t)centered;
+    sumSquares += (int64_t)centered * (int64_t)centered;
   }
   double rms = sqrt((double)sumSquares / (double)samplesRead);
 
-  unsigned long now = millis();
+  // Update adaptive ambient noise floor when not speaking
+  if (!isVoiceActive && rms < VAD_RMS_THRESHOLD) {
+    noiseFloorRms = 0.95 * noiseFloorRms + 0.05 * rms;
+  }
 
-  if (rms > VAD_RMS_THRESHOLD) {
-    // Voice detected
+  double dynamicThreshold = fmax((double)VAD_RMS_THRESHOLD, noiseFloorRms * 2.5 + 150.0);
+
+  if (rms > dynamicThreshold) {
     if (!isVoiceActive) {
       isVoiceActive = true;
+      voiceStartTimeMs = now;
       sendStatus("VOICE_START");
       displayText("Listening...");
-      Serial.println("VAD: Voice started");
+      Serial.printf("VAD: Voice started (RMS=%.0f, thresh=%.0f)\n", rms, dynamicThreshold);
     }
     lastVoiceTimeMs = now;
+    sendAudioBufferOverBle(samplesRead);
 
-    // Send audio chunks via BLE notify
-    if (bleConnected && audioCharacteristic != nullptr) {
-      size_t totalBytes = samplesRead * sizeof(int16_t);
-      size_t offset = 0;
-      while (offset < totalBytes) {
-        size_t chunkSize = totalBytes - offset;
-        if (chunkSize > BLE_AUDIO_CHUNK) {
-          chunkSize = BLE_AUDIO_CHUNK;
-        }
-        audioCharacteristic->setValue(
-            (uint8_t *)audioSendBuffer + offset, chunkSize);
-        audioCharacteristic->notify();
-        offset += chunkSize;
-        if (offset < totalBytes) {
-          delay(3); // Brief spacing so BLE TX buffer does not drop packets
-        }
-      }
+    // Safety cap: if voice remains active for > 6 seconds, force end-of-turn
+    if (now - voiceStartTimeMs >= MAX_VOICE_DURATION_MS) {
+      isVoiceActive = false;
+      cooldownUntilMs = now + POST_TURN_COOLDOWN_MS;
+      sendStatus("VOICE_END");
+      displayText("Thinking...");
+      Serial.println("VAD: Max voice duration reached -> VOICE_END");
     }
   } else if (isVoiceActive) {
-    // Below threshold - still send audio until silence timeout
-    if (bleConnected && audioCharacteristic != nullptr) {
-      size_t totalBytes = samplesRead * sizeof(int16_t);
-      size_t offset = 0;
-      while (offset < totalBytes) {
-        size_t chunkSize = totalBytes - offset;
-        if (chunkSize > BLE_AUDIO_CHUNK) {
-          chunkSize = BLE_AUDIO_CHUNK;
-        }
-        audioCharacteristic->setValue(
-            (uint8_t *)audioSendBuffer + offset, chunkSize);
-        audioCharacteristic->notify();
-        offset += chunkSize;
-        if (offset < totalBytes) {
-          delay(3);
-        }
-      }
-    }
+    // Below threshold - send trailing audio until silence timeout
+    sendAudioBufferOverBle(samplesRead);
 
-    // Check silence timeout
-    if (now - lastVoiceTimeMs >= SILENCE_TIMEOUT_MS) {
+    if (now - lastVoiceTimeMs >= SILENCE_TIMEOUT_MS ||
+        now - voiceStartTimeMs >= MAX_VOICE_DURATION_MS) {
       isVoiceActive = false;
+      cooldownUntilMs = now + POST_TURN_COOLDOWN_MS;
       sendStatus("VOICE_END");
       displayText("Thinking...");
       Serial.println("VAD: Voice ended");
@@ -430,7 +453,6 @@ void setup() {
     while (true);
   }
 
-  // BCLK, WS, DOUT (unused), DIN
   microphone.setPins(
       I2S_SCK,
       I2S_WS,
@@ -466,7 +488,6 @@ void loop() {
     displayText(msgToRender.c_str());
   }
 
-  // Skip audio processing during OTA to avoid contention
   if (otaInProgress) {
     delay(20);
     return;
