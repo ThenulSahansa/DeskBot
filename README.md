@@ -23,8 +23,8 @@ DeskBot is an open-source, AI-powered desktop companion powered by an **ESP32-C3
  │                           DeskDroid (Android)                          │
  │                                                                        │
  │   - Bridges BLE audio packets to WebSocket frames                      │
- │   - Applies 6x software audio gain and peak amplitude monitoring       │
- │   - Guards against silence / false triggers to prevent hallucinations  │
+ │   - Applies automatic gain control (AGC) and level monitoring           │
+ │   - Drops non-speech turns locally; shows what Gemini HEARD in Terminal │
  └───────────────────────────────────┬────────────────────────────────────┘
                                      │
                    WebSocket (WSS) BidiGenerateContent
@@ -80,7 +80,7 @@ DeskBot is an open-source, AI-powered desktop companion powered by an **ESP32-C3
 ## BLE Protocol & GATT Specifications
 
 - **Device Name:** `DeskBot`
-- **Negotiated MTU:** Up to 517 bytes (negotiated automatically by DeskDroid)
+- **Negotiated MTU:** 247 bytes requested by DeskDroid (240-byte audio chunks fit); DeskDroid also requests `CONNECTION_PRIORITY_HIGH` so ~32 KB/s of PCM fits through the link
 - **Primary Service UUID:** `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
 
 | Characteristic | UUID | Properties | Format / Payload | Description |
@@ -96,17 +96,17 @@ DeskBot is an open-source, AI-powered desktop companion powered by an **ESP32-C3
 ## Core Capabilities
 
 1. **On-Device Voice Activity Detection (VAD):**
-   - Samples audio continuously at 16,000 Hz via I2S DMA.
-   - Calculates real-time Root-Mean-Square (RMS) amplitude with hardware bit shifting (`>> 14`).
-   - Automatically detects speech start (`RMS > 120`), updates display to `"Listening..."`, and begins streaming BLE audio packets.
-   - Automatically detects silence (`650 ms` timeout), updates display to `"Thinking..."`, sends `VOICE_END`, and stops BLE transmission.
-
+   
+   - Samples audio continuously at 16,000 Hz via I2S DMA and removes the mic's DC bias with a one-pole DC-blocking filter (state kept across blocks).
+   - RMS is measured on the DC-free 16-bit signal. Speech starts when RMS exceeds `max(70, noiseFloor*3 + 30)` for 2 consecutive 16 ms blocks; an adaptive noise floor follows the room.
+   - A **320 ms pre-roll buffer** is sent first, so the beginning of the sentence is never clipped.
+   - While talking, only 50% of the start threshold keeps the turn open (hysteresis); `700 ms` of silence sends `VOICE_END` (hard cap: 20 s).
+   - Audio and `VOICE_START`/`VOICE_END` markers go through one FreeRTOS queue drained by a dedicated BLE task, so a slow BLE link or OLED redraw can never stall the I2S read loop.
 2. **Bidirectional Multimodal AI Streaming (Gemini Live):**
-   - The Android companion buffers BLE audio packets into ~50 ms chunks (1600 bytes) and streams them via WebSocket `realtimeInput.mediaChunks` (`audio/pcm;rate=16000`).
-   - Software gain (6x) amplifies subtle speech without clipping.
-   - Turn completion commits user speech with `clientContent: { turnComplete: true }`.
-   - Real-time text responses are extracted from `serverContent.outputTranscription.text` (and audio transcription) and streamed back to the OLED.
-
+   
+   - The Android companion applies an AGC (target RMS ~3000, soft limiter), holds each turn back until >=120 ms of voiced audio is seen (clicks/hiss never reach Gemini), then streams 50 ms chunks via `realtimeInput.audio` (`audio/pcm;rate=16000`).
+   - A turn is committed by sending 500 ms of silence followed by `realtimeInput: { audioStreamEnd: true }`. **Never send an empty `clientContent: { turnComplete: true }`**: that makes Gemini answer from the accumulated conversation history instead of from your voice.
+   - `inputAudioTranscription` is shown live in the app's Terminal as a `[HEARD]` line (what Gemini recognised); the reply comes from `serverContent.outputTranscription` and is streamed to the OLED.
 3. **Dynamic OLED Word-Wrapping & Auto-Scroll:**
    - Word wraps long text to 21 characters per line.
    - Automatically scrolls to the newest lines if the text exceeds 8 lines (for 128x64) or 4 lines (for 128x32).
@@ -152,7 +152,7 @@ Use this guide when diagnosing or resolving issues across the firmware, BLE, or 
 
 ### 1. Gemini Live WebSocket Closes Immediately (Error `1007: Precondition check failed`)
 - **Cause:** Attempting to disable server-side VAD using `"realtimeInputConfig": { "automaticActivityDetection": { "disabled": true } }`, or sending manual `activityStart`/`activityEnd` packets. The `models/gemini-3.8-live` model rejects this payload.
-- **Resolution:** Do **not** include `realtimeInputConfig` in `sendSetup()`. Let server-side detection remain enabled by default, and commit speech turns using `clientContent: { turnComplete: true }`.
+- **Resolution:** Do **not** include `realtimeInputConfig` in `sendSetup()`. Let server-side detection remain enabled by default, and end each speech turn with trailing silence + `realtimeInput: { audioStreamEnd: true }`.
 
 ### 2. Gemini Live WebSocket Closes (Error `1007: The requested combination of response modalities (TEXT) is not supported`)
 - **Cause:** `gemini-3.8-live` (audio-native live model) does not allow `responseModalities: ["TEXT"]`.
@@ -164,8 +164,14 @@ Use this guide when diagnosing or resolving issues across the firmware, BLE, or 
   2. The firmware's `VAD_RMS_THRESHOLD` was set too high (e.g. `500`), so normal speech was cut off and only a mic tap or silence was sent.
 - **Resolution:**
   - Verify INMP441 **L/R** pin is soldered directly to **GND**.
-  - Keep `VAD_RMS_THRESHOLD` around `100 - 150` with `>> 14` bit shift in `firmware.ino`.
-  - Ensure the silence guard in `GeminiLiveManager.kt` is active: turns with `turnMaxPeak < 35` or fewer than 3 chunks are dropped before prompting Gemini.
+  - Tune `VAD_START_RMS_MIN` in `firmware.ino` (default `70`). Set `VAD_DEBUG 1` to print RMS / noise floor / thresholds to Serial and pick a value just above your room noise and well below your speech.
+  - Non-speech turns are dropped locally by `GeminiLiveManager.kt` (less than 120 ms of voiced audio) and logged as `Ignored non-speech turn` in the Terminal.
+
+### 3b. Gemini Answers About an Earlier Conversation / Doesn't React to What I Said
+
+- **Cause:** Ending turns with an empty `clientContent: { turnComplete: true }`. Per the Live API reference, `clientContent` is appended to the conversation history and `turnComplete` starts generation from that accumulated prompt, not from the realtime audio stream.
+- **Resolution:** Use `realtimeInput.audioStreamEnd` (see `sendEndOfTurn()`). Check the `[HEARD]` line in the Terminal: it shows exactly what Gemini recognised for each turn. `(no transcript)` means it answered without hearing speech: raise mic level / check wiring / lower `VAD_START_RMS_MIN`.
+- **If speech is recognised badly:** the Terminal warns `BLE delivered only ~N% of the expected audio` when packets are lost; check that the connection priority / MTU lines appear in the log.
 
 ### 4. OLED Display Shows Nothing or Displays Garbage
 - **Cause:** Incorrect I2C pins or bad display address.

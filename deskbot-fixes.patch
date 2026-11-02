@@ -1,0 +1,1217 @@
+diff --git a/DeskDroid/app/src/main/java/com/example/deskbot/GeminiLiveManager.kt b/DeskDroid/app/src/main/java/com/example/deskbot/GeminiLiveManager.kt
+index 81fcc20..ff9f375 100644
+--- a/DeskDroid/app/src/main/java/com/example/deskbot/GeminiLiveManager.kt
++++ b/DeskDroid/app/src/main/java/com/example/deskbot/GeminiLiveManager.kt
+@@ -13,6 +13,9 @@ import org.json.JSONArray
+ import org.json.JSONObject
+ import java.io.ByteArrayOutputStream
+ import java.util.concurrent.TimeUnit
++import kotlin.math.abs
++import kotlin.math.roundToInt
++import kotlin.math.sqrt
+ 
+ class GeminiLiveManager(
+     private val onResponse: (String) -> Unit,
+@@ -30,7 +33,30 @@ class GeminiLiveManager(
+         private const val WS_URL =
+             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+ 
+-        private const val AUDIO_IDLE_END_OF_TURN_MS = 900L
++        private const val SAMPLE_RATE = 16000
++        private const val BYTES_PER_SECOND = SAMPLE_RATE * 2
++
++        // Fallback: if the ESP32 VOICE_END marker is lost, finalize after this much BLE silence.
++        private const val AUDIO_IDLE_END_OF_TURN_MS = 1000L
++
++        // One WebSocket audio message = 50 ms of 16 kHz mono 16-bit PCM.
++        private const val SEND_CHUNK_BYTES = 1600
++
++        // Digital silence appended after speech so Gemini's server-side VAD sees the speech end.
++        private const val TRAILING_SILENCE_MS = 500
++
++        // A BLE packet counts as "voiced" above this RMS (firmware output scale, before AGC).
++        private const val ACTIVE_CHUNK_RMS = 45f
++
++        // A turn is only sent to Gemini once at least 120 ms of voiced audio has been seen.
++        // Blips / clicks that slip past the firmware VAD are dropped locally and never reach Gemini.
++        private const val MIN_ACTIVE_SAMPLES = SAMPLE_RATE * 120 / 1000
++
++        // Automatic gain control (replaces the old blind 6x gain, which clipped loud speech).
++        private const val AGC_TARGET_RMS = 3000f
++        private const val AGC_MIN_GAIN = 1f
++        private const val AGC_MAX_GAIN = 20f
++        private const val AGC_START_GAIN = 8f
+     }
+ 
+     private var webSocket: WebSocket? = null
+@@ -38,16 +64,29 @@ class GeminiLiveManager(
+     @Volatile private var isSetupComplete = false
+     @Volatile private var isConnected = false
+     @Volatile private var userDisconnected = false
+-    @Volatile private var hasUnfinishedAudioTurn = false
+-    @Volatile private var sentAudioChunksInTurn = 0
+-    @Volatile private var turnMaxPeak = 0
+-    @Volatile private var lastTurnStartTimeMs = 0L
+-    @Volatile private var lastTurnEndTimeMs = 0L
+ 
+     private val mainHandler = Handler(Looper.getMainLooper())
++
++    // ---- Per-turn microphone state (all guarded by turnLock) ----
++    private val turnLock = Any()
++    private var hasUnfinishedAudioTurn = false
++    private var turnStreaming = false            // true once speech is confirmed and audio is being sent
++    private val pending = ByteArrayOutputStream() // gained audio not yet sent to Gemini
++    private var turnSamples = 0
++    private var turnActiveSamples = 0
++    private var turnBytesIn = 0
++    private var turnPeak = 0
++    private var turnPeakRms = 0f
++    private var turnFirstPacketMs = 0L
++    private var turnLastPacketMs = 0L
++    private var agcGain = AGC_START_GAIN
++
++    // ---- Model output / transcript state ----
+     private val turnResponseBuffer = StringBuilder()
+-    private val audioBuffer = ByteArrayOutputStream()
+-    private val BUFFER_THRESHOLD_BYTES = 1600 // ~50ms of 16kHz mono 16-bit PCM
++    private val heardBuffer = StringBuilder()
++    private var heardSeq = 0
++    @Volatile private var responseStartedThisTurn = false
++    @Volatile private var heardShownThisTurn = false
+ 
+     // Always post TerminalLog calls to the Main UI thread so Jetpack Compose's
+     // SnapshotStateList never crashes with ConcurrentModificationException!
+@@ -61,9 +100,21 @@ class GeminiLiveManager(
+         }
+     }
+ 
++    // Live-updating terminal line (used for the "what Gemini heard" transcript).
++    private fun logLive(key: String, tag: String, message: String, level: LogLevel = LogLevel.INFO) {
++        if (Looper.myLooper() == Looper.getMainLooper()) {
++            TerminalLog.upsert(key, tag, message, level)
++        } else {
++            mainHandler.post {
++                TerminalLog.upsert(key, tag, message, level)
++            }
++        }
++    }
++
+     private val idleEndOfTurnRunnable = Runnable {
+-        if (hasUnfinishedAudioTurn && sentAudioChunksInTurn > 0) {
+-            logUi("GEMINI", "Audio stream idle ($sentAudioChunksInTurn chunks) – finalizing turn", LogLevel.INFO)
++        val open = synchronized(turnLock) { hasUnfinishedAudioTurn }
++        if (open) {
++            logUi("GEMINI", "Audio stream idle – finalizing turn", LogLevel.INFO)
+             sendEndOfTurn()
+         }
+     }
+@@ -103,8 +154,7 @@ class GeminiLiveManager(
+                 logUi("GEMINI", "WebSocket closing ($code): $reason", LogLevel.WARN)
+                 isConnected = false
+                 isSetupComplete = false
+-                hasUnfinishedAudioTurn = false
+-                sentAudioChunksInTurn = 0
++                resetSessionState()
+                 try {
+                     webSocket.close(1000, null)
+                 } catch (_: Exception) {}
+@@ -132,8 +182,7 @@ class GeminiLiveManager(
+                 logUi("GEMINI", "WebSocket failure: $msg", LogLevel.ERROR)
+                 isConnected = false
+                 isSetupComplete = false
+-                hasUnfinishedAudioTurn = false
+-                sentAudioChunksInTurn = 0
++                resetSessionState()
+ 
+                 if (!userDisconnected) {
+                     logUi("GEMINI", "Retrying connection in 2s...", LogLevel.WARN)
+@@ -146,6 +195,9 @@ class GeminiLiveManager(
+     }
+ 
+     private fun sendSetup(ws: WebSocket) {
++        // NOTE: do NOT add realtimeInputConfig here. This model closes the socket with 1007 when
++        // server-side VAD is disabled. Server VAD stays on; we end each utterance with
++        // `audioStreamEnd` (see sendEndOfTurn) instead.
+         val setupJson = JSONObject().apply {
+             put("setup", JSONObject().apply {
+                 put("model", MODEL_ID)
+@@ -154,6 +206,7 @@ class GeminiLiveManager(
+                         put("AUDIO")
+                     })
+                 })
++                // Transcripts: what Gemini HEARD (input) and what it SAID (output).
+                 put("outputAudioTranscription", JSONObject())
+                 put("inputAudioTranscription", JSONObject())
+                 put("systemInstruction", JSONObject().apply {
+@@ -161,7 +214,11 @@ class GeminiLiveManager(
+                         put(JSONObject().apply {
+                             put(
+                                 "text",
+-                                "You are Maya. An AI agent, a concise and friendly desktop companion. Keep your answers short (1 to 2 sentences)."
++                                "You are Maya. An AI agent, a concise and friendly desktop companion. " +
++                                    "Keep your answers short (1 to 2 sentences). " +
++                                    "Answer only what the user has just said in the audio. Never continue or repeat " +
++                                    "an earlier topic unless the user brings it up. If the audio is unclear, " +
++                                    "silent or just noise, briefly ask the user to repeat instead of guessing."
+                             )
+                         })
+                     })
+@@ -172,6 +229,10 @@ class GeminiLiveManager(
+         logUi("GEMINI", "Setup message sent (model=$MODEL_ID, modality=AUDIO)", LogLevel.INFO)
+     }
+ 
++    // ------------------------------------------------------------------------------------
++    // Server -> app
++    // ------------------------------------------------------------------------------------
++
+     private fun handleServerMessage(text: String) {
+         try {
+             val json = JSONObject(text)
+@@ -195,27 +256,42 @@ class GeminiLiveManager(
+             if (json.has("serverContent")) {
+                 val serverContent = json.getJSONObject("serverContent")
+ 
+-                val inputTranscript = when {
++                // ---- What Gemini HEARD (live transcript of the user's speech) ----
++                // Fragments arrive incrementally and already contain their own spaces, so they must
++                // be concatenated raw and only trimmed for display.
++                val inputFragment = when {
+                     serverContent.has("inputTranscription") ->
+-                        serverContent.getJSONObject("inputTranscription").optString("text", "").trim()
++                        serverContent.getJSONObject("inputTranscription").optString("text", "")
+                     serverContent.has("inputAudioTranscription") ->
+-                        serverContent.getJSONObject("inputAudioTranscription").optString("text", "").trim()
++                        serverContent.getJSONObject("inputAudioTranscription").optString("text", "")
+                     else -> ""
+                 }
+-                if (inputTranscript.isNotEmpty()) {
+-                    logUi("GEMINI", "Heard: $inputTranscript", LogLevel.INFO)
++                if (inputFragment.isNotEmpty()) {
++                    val heardNow: String
++                    val key: String
++                    synchronized(heardBuffer) {
++                        heardBuffer.append(inputFragment)
++                        heardNow = heardBuffer.toString().trim()
++                        key = "heard-$heardSeq"
++                    }
++                    if (heardNow.isNotEmpty()) {
++                        heardShownThisTurn = true
++                        logLive(key, "HEARD", "\"$heardNow\"", LogLevel.INFO)
++                    }
+                 }
+ 
+-                val outputTranscript = when {
++                // ---- What Gemini SAYS ----
++                val outputFragment = when {
+                     serverContent.has("outputTranscription") ->
+                         serverContent.getJSONObject("outputTranscription").optString("text", "")
+                     serverContent.has("outputAudioTranscription") ->
+                         serverContent.getJSONObject("outputAudioTranscription").optString("text", "")
+                     else -> ""
+                 }
+-                if (outputTranscript.isNotEmpty()) {
++                if (outputFragment.isNotEmpty()) {
++                    markResponseStarted()
+                     synchronized(turnResponseBuffer) {
+-                        turnResponseBuffer.append(outputTranscript)
++                        turnResponseBuffer.append(outputFragment)
+                     }
+                 }
+ 
+@@ -226,14 +302,26 @@ class GeminiLiveManager(
+                         for (i in 0 until parts.length()) {
+                             val part = parts.getJSONObject(i)
+                             if (part.has("text") && !part.optBoolean("thought", false)) {
++                                markResponseStarted()
+                                 synchronized(turnResponseBuffer) {
+                                     turnResponseBuffer.append(part.getString("text"))
+                                 }
+                             }
++                            if (part.has("inlineData")) {
++                                // Audio reply: we only need its transcript, but it still means the
++                                // model has finished listening to this turn.
++                                markResponseStarted()
++                            }
+                         }
+                     }
+                 }
+ 
++                if (serverContent.optBoolean("interrupted", false)) {
++                    // User spoke over the reply: drop the partial answer so it can't leak into the next turn.
++                    synchronized(turnResponseBuffer) { turnResponseBuffer.setLength(0) }
++                    responseStartedThisTurn = false
++                }
++
+                 val generationComplete = serverContent.optBoolean("generationComplete", false)
+                 val turnComplete = serverContent.optBoolean("turnComplete", false)
+ 
+@@ -248,6 +336,17 @@ class GeminiLiveManager(
+                         onResponse(fullResponse)
+                     }
+                     if (turnComplete) {
++                        finalizeHeardIfPending()
++                        if (responseStartedThisTurn && !heardShownThisTurn) {
++                            logUi(
++                                "HEARD",
++                                "(no transcript) Gemini answered without recognising any speech - " +
++                                    "the audio was probably too quiet or noisy",
++                                LogLevel.WARN
++                            )
++                        }
++                        responseStartedThisTurn = false
++                        heardShownThisTurn = false
+                         logUi("GEMINI", "Turn complete", LogLevel.INFO)
+                     }
+                 }
+@@ -257,81 +356,146 @@ class GeminiLiveManager(
+         }
+     }
+ 
+-    fun sendStartOfTurn() {
+-        val now = System.currentTimeMillis()
+-        if (now - lastTurnStartTimeMs < 300L) return
+-        lastTurnStartTimeMs = now
++    // The first piece of model output for a turn means the user's speech for that turn has been
++    // transcribed: freeze the "HEARD" line and start a fresh one for the next utterance.
++    private fun markResponseStarted() {
++        if (responseStartedThisTurn) return
++        responseStartedThisTurn = true
++        finalizeHeardIfPending()
++    }
+ 
+-        if (!isConnected || !isSetupComplete) return
+-        hasUnfinishedAudioTurn = true
+-        sentAudioChunksInTurn = 0
+-        turnMaxPeak = 0
+-        synchronized(audioBuffer) {
+-            audioBuffer.reset()
++    private fun finalizeHeardIfPending() {
++        val heard: String
++        val key: String
++        synchronized(heardBuffer) {
++            heard = heardBuffer.toString().trim()
++            if (heard.isEmpty()) return
++            heardBuffer.setLength(0)
++            key = "heard-$heardSeq"
++            heardSeq++
+         }
+-        synchronized(turnResponseBuffer) {
+-            turnResponseBuffer.setLength(0)
++        logLive(key, "HEARD", "\"$heard\"", LogLevel.SUCCESS)
++    }
++
++    // ------------------------------------------------------------------------------------
++    // App -> server (microphone audio)
++    // ------------------------------------------------------------------------------------
++
++    fun sendStartOfTurn() {
++        if (!isConnected || !isSetupComplete) return
++        synchronized(turnLock) {
++            // Idempotent: the ESP32 sends VOICE_START on two characteristics, and audio packets
++            // may already be flowing by the time the second marker is processed.
++            if (!hasUnfinishedAudioTurn) beginTurnLocked()
+         }
++        mainHandler.removeCallbacks(idleEndOfTurnRunnable)
++        mainHandler.postDelayed(idleEndOfTurnRunnable, AUDIO_IDLE_END_OF_TURN_MS)
++    }
++
++    private fun beginTurnLocked() {
++        hasUnfinishedAudioTurn = true
++        turnStreaming = false
++        pending.reset()
++        turnSamples = 0
++        turnActiveSamples = 0
++        turnBytesIn = 0
++        turnPeak = 0
++        turnPeakRms = 0f
++        turnFirstPacketMs = 0L
++        turnLastPacketMs = 0L
++        agcGain = agcGain.coerceIn(4f, 16f)
+         logUi("GEMINI", "Voice turn started", LogLevel.INFO)
+     }
+ 
+     fun sendAudio(pcmData: ByteArray) {
+         // Silently ignore audio packets if WebSocket setup hasn't completed yet
+-        if (!isConnected || !isSetupComplete || pcmData.isEmpty()) {
+-            return
+-        }
++        if (!isConnected || !isSetupComplete || pcmData.size < 2) return
++
++        val n = pcmData.size / 2
++        synchronized(turnLock) {
++            if (!hasUnfinishedAudioTurn) beginTurnLocked() // tolerate a lost VOICE_START marker
++
++            val now = System.currentTimeMillis()
++            if (turnFirstPacketMs == 0L) turnFirstPacketMs = now
++            turnLastPacketMs = now
++            turnBytesIn += pcmData.size
++
++            // Decode little-endian 16-bit samples and measure level.
++            val samples = ShortArray(n)
++            var sumSq = 0.0
++            var peak = 0
++            for (i in 0 until n) {
++                val s = ((pcmData[2 * i + 1].toInt() shl 8) or (pcmData[2 * i].toInt() and 0xFF)).toShort()
++                samples[i] = s
++                val a = abs(s.toInt())
++                if (a > peak) peak = a
++                sumSq += s.toDouble() * s.toDouble()
++            }
++            val rms = sqrt(sumSq / n).toFloat()
++            if (peak > turnPeak) turnPeak = peak
++            if (rms > turnPeakRms) turnPeakRms = rms
++            turnSamples += n
++            val voiced = rms >= ACTIVE_CHUNK_RMS
++            if (voiced) turnActiveSamples += n
++
++            // AGC: drop gain quickly when loud, raise it slowly, and never raise it on background noise.
++            val startGain = agcGain
++            if (voiced) {
++                val desired = (AGC_TARGET_RMS / rms).coerceIn(AGC_MIN_GAIN, AGC_MAX_GAIN)
++                val speed = if (desired < agcGain) 0.6f else 0.03f
++                agcGain += (desired - agcGain) * speed
++            }
++            val endGain = agcGain
++
++            val out = ByteArray(n * 2)
++            for (i in 0 until n) {
++                val g = startGain + (endGain - startGain) * (i + 1) / n
++                var v = samples[i] * g
++                val av = abs(v)
++                if (av > 28000f) { // soft limiter instead of hard clipping
++                    val limited = 28000f + (av - 28000f) * 0.15f
++                    v = if (v < 0f) -limited else limited
++                }
++                val iv = v.roundToInt().coerceIn(-32768, 32767)
++                out[2 * i] = (iv and 0xFF).toByte()
++                out[2 * i + 1] = ((iv shr 8) and 0xFF).toByte()
++            }
++            pending.write(out)
+ 
+-        hasUnfinishedAudioTurn = true
+-        sentAudioChunksInTurn++
++            // Hold audio back until the turn is confirmed to contain real speech.
++            if (!turnStreaming && turnActiveSamples >= MIN_ACTIVE_SAMPLES) {
++                turnStreaming = true
++                logUi("AUDIO", "Speech confirmed – streaming to Gemini", LogLevel.INFO)
++            }
++            if (turnStreaming) flushPendingLocked(force = false)
++        }
+ 
+         mainHandler.removeCallbacks(idleEndOfTurnRunnable)
+         mainHandler.postDelayed(idleEndOfTurnRunnable, AUDIO_IDLE_END_OF_TURN_MS)
++    }
+ 
+-        // Process audio with 6x software gain to ensure voice is at intelligible levels,
+-        // and calculate peak amplitude to diagnose silence/noise.
+-        val boosted = ByteArray(pcmData.size)
+-        var chunkPeak = 0
+-        for (i in 0 until pcmData.size - 1 step 2) {
+-            val low = pcmData[i].toInt() and 0xFF
+-            val high = pcmData[i + 1].toInt()
+-            val sample = ((high shl 8) or low).toShort()
+-            val absSample = kotlin.math.abs(sample.toInt())
+-            if (absSample > chunkPeak) chunkPeak = absSample
+-
+-            val amplified = (sample * 6.0f).toInt().coerceIn(-32768, 32767)
+-            boosted[i] = (amplified and 0xFF).toByte()
+-            boosted[i + 1] = ((amplified shr 8) and 0xFF).toByte()
+-        }
+-
+-        if (chunkPeak > turnMaxPeak) {
+-            turnMaxPeak = chunkPeak
+-        }
+-
+-        if (sentAudioChunksInTurn == 1 || sentAudioChunksInTurn % 30 == 0) {
+-            logUi("AUDIO", "Audio chunk #$sentAudioChunksInTurn (peak=$chunkPeak, gain=6x)", LogLevel.INFO)
+-        }
+-
+-        synchronized(audioBuffer) {
+-            audioBuffer.write(boosted)
+-            if (audioBuffer.size() >= BUFFER_THRESHOLD_BYTES) {
+-                flushAudioBufferLocked()
+-            }
++    // Must be called with turnLock held.
++    private fun flushPendingLocked(force: Boolean) {
++        if (!turnStreaming || pending.size() == 0) return
++        val data = pending.toByteArray()
++        var offset = 0
++        while (data.size - offset >= SEND_CHUNK_BYTES || (force && offset < data.size)) {
++            val end = minOf(offset + SEND_CHUNK_BYTES, data.size)
++            sendAudioChunk(data, offset, end)
++            offset = end
+         }
++        pending.reset()
++        if (offset < data.size) pending.write(data, offset, data.size - offset)
+     }
+ 
+-    private fun flushAudioBufferLocked() {
+-        if (audioBuffer.size() == 0 || !isConnected || !isSetupComplete) return
+-        val chunk = audioBuffer.toByteArray()
+-        audioBuffer.reset()
+-
+-        val base64Audio = Base64.encodeToString(chunk, Base64.NO_WRAP)
++    private fun sendAudioChunk(data: ByteArray, from: Int, to: Int) {
++        val base64Audio = Base64.encodeToString(data, from, to - from, Base64.NO_WRAP)
++        // `realtimeInput.audio` is the current field; `mediaChunks` is deprecated.
+         val audioJson = JSONObject().apply {
+             put("realtimeInput", JSONObject().apply {
+-                put("mediaChunks", JSONArray().apply {
+-                    put(JSONObject().apply {
+-                        put("mimeType", "audio/pcm;rate=16000")
+-                        put("data", base64Audio)
+-                    })
++                put("audio", JSONObject().apply {
++                    put("mimeType", "audio/pcm;rate=$SAMPLE_RATE")
++                    put("data", base64Audio)
+                 })
+             })
+         }
+@@ -340,59 +504,98 @@ class GeminiLiveManager(
+ 
+     fun sendEndOfTurn() {
+         mainHandler.removeCallbacks(idleEndOfTurnRunnable)
+-        val now = System.currentTimeMillis()
+-        if (now - lastTurnEndTimeMs < 300L) return
+-        lastTurnEndTimeMs = now
+-
+-        // Only finalize turn if we actually sent audio chunks in this turn
+-        if (!hasUnfinishedAudioTurn || sentAudioChunksInTurn == 0) {
+-            return
+-        }
+-        hasUnfinishedAudioTurn = false
+-        val chunksSent = sentAudioChunksInTurn
+-        val maxPeak = turnMaxPeak
+-        sentAudioChunksInTurn = 0
+-        turnMaxPeak = 0
+-
+-        if (!isConnected || !isSetupComplete) return
++        synchronized(turnLock) {
++            if (!hasUnfinishedAudioTurn) return // second marker / idle timer after the turn already ended
++            hasUnfinishedAudioTurn = false
++
++            val seconds = turnSamples.toFloat() / SAMPLE_RATE
++            val voicedMs = turnActiveSamples * 1000 / SAMPLE_RATE
++            val peak = turnPeak
++            val peakRms = turnPeakRms.roundToInt()
++            val gain = agcGain
++            val bytesIn = turnBytesIn
++            val elapsedMs = turnLastPacketMs - turnFirstPacketMs
++            val streaming = turnStreaming
++            turnStreaming = false
++
++            if (!isConnected || !isSetupComplete) {
++                pending.reset()
++                return
++            }
+ 
+-        // Flush any remaining buffered audio bytes before ending the turn
+-        synchronized(audioBuffer) {
+-            flushAudioBufferLocked()
+-        }
++            if (!streaming) {
++                // Never reached Gemini, so it cannot hallucinate an answer from it.
++                pending.reset()
++                logUi(
++                    "AUDIO",
++                    "Ignored non-speech turn (%.1fs, voiced=%dms, peakRms=%d, peak=%d). If real speech keeps landing here, the mic is too quiet - check the INMP441 L/R pin is tied to GND."
++                        .format(seconds, voicedMs, peakRms, peak),
++                    LogLevel.WARN
++                )
++                return
++            }
+ 
+-        // Diagnostic guard: If fewer than 3 chunks or max peak is negligible (< 35),
+-        // it was just a false trigger or dead silence. Don't send turnComplete to avoid hallucinations!
+-        if (chunksSent < 3 || maxPeak < 35) {
+-            logUi("AUDIO", "Ignored silence ($chunksSent chunks, peak=$maxPeak). Check INMP441 L/R pin is tied to GND!", LogLevel.WARN)
+-            return
++            // Everything still buffered, then trailing silence, then tell Gemini the mic stream ended.
++            // This is what commits the turn; an empty clientContent.turnComplete would make Gemini
++            // answer from the old conversation history instead of from this audio.
++            turnStreaming = true
++            flushPendingLocked(force = true)
++            turnStreaming = false
++
++            val tail = ByteArray(BYTES_PER_SECOND * TRAILING_SILENCE_MS / 1000)
++            var off = 0
++            while (off < tail.size) {
++                val end = minOf(off + SEND_CHUNK_BYTES, tail.size)
++                sendAudioChunk(tail, off, end)
++                off = end
++            }
++            val endJson = JSONObject().apply {
++                put("realtimeInput", JSONObject().apply {
++                    put("audioStreamEnd", true)
++                })
++            }
++            webSocket?.send(endJson.toString())
++
++            logUi(
++                "GEMINI",
++                "Speech turn sent (%.1fs, voiced=%dms, peakRms=%d, gain=%.1fx)"
++                    .format(seconds, voicedMs, peakRms, gain),
++                LogLevel.INFO
++            )
++
++            // Rough BLE health check: audio should arrive at >= real-time rate (32 KB/s).
++            if (elapsedMs > 300) {
++                val ratePct = (bytesIn * 1000L * 100L / (BYTES_PER_SECOND.toLong() * elapsedMs)).toInt()
++                if (ratePct < 85) {
++                    logUi(
++                        "AUDIO",
++                        "BLE delivered only ~$ratePct% of the expected audio - packets are being lost, which hurts recognition.",
++                        LogLevel.WARN
++                    )
++                }
++            }
+         }
++    }
+ 
+-        // Commit turn: tell Gemini that the user speech stream is complete
+-        val endJson = JSONObject().apply {
+-            put("clientContent", JSONObject().apply {
+-                put("turnComplete", true)
+-            })
++    private fun resetSessionState() {
++        mainHandler.removeCallbacks(idleEndOfTurnRunnable)
++        synchronized(turnLock) {
++            hasUnfinishedAudioTurn = false
++            turnStreaming = false
++            pending.reset()
+         }
+-        webSocket?.send(endJson.toString())
+-        logUi("GEMINI", "Speech turn committed ($chunksSent audio chunks, peak=$maxPeak)", LogLevel.INFO)
++        synchronized(turnResponseBuffer) { turnResponseBuffer.setLength(0) }
++        synchronized(heardBuffer) { heardBuffer.setLength(0) }
++        responseStartedThisTurn = false
++        heardShownThisTurn = false
+     }
+ 
+     fun disconnect() {
+         userDisconnected = true
+         logUi("GEMINI", "Disconnecting from Gemini Live API", LogLevel.INFO)
+-        mainHandler.removeCallbacks(idleEndOfTurnRunnable)
+-        hasUnfinishedAudioTurn = false
+-        sentAudioChunksInTurn = 0
+-        turnMaxPeak = 0
+         isConnected = false
+         isSetupComplete = false
+-        synchronized(turnResponseBuffer) {
+-            turnResponseBuffer.setLength(0)
+-        }
+-        synchronized(audioBuffer) {
+-            audioBuffer.reset()
+-        }
++        resetSessionState()
+         try {
+             webSocket?.close(1000, "User disconnected")
+         } catch (_: Exception) {}
+@@ -400,4 +603,4 @@ class GeminiLiveManager(
+     }
+ 
+     fun isConnected(): Boolean = isConnected && isSetupComplete
+-}
+\ No newline at end of file
++}
+diff --git a/DeskDroid/app/src/main/java/com/example/deskbot/MainActivity.kt b/DeskDroid/app/src/main/java/com/example/deskbot/MainActivity.kt
+index 320fbb6..65af329 100644
+--- a/DeskDroid/app/src/main/java/com/example/deskbot/MainActivity.kt
++++ b/DeskDroid/app/src/main/java/com/example/deskbot/MainActivity.kt
+@@ -680,6 +680,11 @@ class MainActivity : ComponentActivity() {
+                 // 3. Request MTU after descriptor writes complete
+                 android.os.Handler(mainLooper).postDelayed({
+                     if (!isConnected || activeGatt !== gatt) return@postDelayed
++                    try {
++                        // ~32 KB/s of raw PCM does not fit through the default 30-50 ms connection
++                        // interval; without this the ESP32 drops audio packets and Gemini hears garbled speech.
++                        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
++                    } catch (_: Exception) {}
+                     try {
+                         gatt.requestMtu(247)
+                     } catch (_: Exception) {}
+@@ -709,14 +714,14 @@ class MainActivity : ComponentActivity() {
+                     // Check if the packet is a VOICE_START / VOICE_END control marker sent over audioChar
+                     if (value.size <= 16) {
+                         val marker = String(value, Charsets.UTF_8).trim()
+-                        if (marker.contains("VOICE_START", ignoreCase = true)) {
++                        if (marker == "VOICE_START") {
+                             receivedAudioPacketCount = 0
+                             runOnUiThread {
+                                 TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
+                             }
+                             geminiManager?.sendStartOfTurn()
+                             return
+-                        } else if (marker.contains("VOICE_END", ignoreCase = true)) {
++                        } else if (marker == "VOICE_END") {
+                             val totalPackets = receivedAudioPacketCount
+                             receivedAudioPacketCount = 0
+                             runOnUiThread {
+@@ -1156,7 +1161,7 @@ class MainActivity : ComponentActivity() {
+     }
+ 
+     private fun startAiSession() {
+-        if (GeminiLiveManager.API_KEY == "YOUR_GEMINI_API_KEY") {
++        if (GeminiLiveManager.API_KEY == "YOUR_GEMINI_API_KEY" || GeminiLiveManager.API_KEY == "API_KEY" || GeminiLiveManager.API_KEY.isBlank()) {
+             Toast.makeText(this, "Please configure your Gemini API Key in GeminiLiveManager.kt", Toast.LENGTH_LONG).show()
+             TerminalLog.log("GEMINI", "Warning: API key is set to default placeholder in GeminiLiveManager.kt", LogLevel.WARN)
+         }
+diff --git a/DeskDroid/app/src/main/java/com/example/deskbot/TerminalLog.kt b/DeskDroid/app/src/main/java/com/example/deskbot/TerminalLog.kt
+index 5e11c9d..3508020 100644
+--- a/DeskDroid/app/src/main/java/com/example/deskbot/TerminalLog.kt
++++ b/DeskDroid/app/src/main/java/com/example/deskbot/TerminalLog.kt
+@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicLong
+ data class LogEntry(
+     val id: Long = 0L,
+     val timestamp: String,
+-    val tag: String,     // BLE, AUDIO, GEMINI, DISPLAY, SYSTEM
++    val tag: String,     // BLE, AUDIO, GEMINI, HEARD, DISPLAY, SYSTEM
+     val message: String,
+     val level: LogLevel = LogLevel.INFO
+ )
+@@ -25,6 +25,10 @@ object TerminalLog {
+     private val idCounter = AtomicLong(0L)
+     private const val MAX_ENTRIES = 500
+ 
++    // key -> entry id, for lines that are updated in place (e.g. the live "HEARD" transcript).
++    // Only touched on the main thread.
++    private val keyedIds = HashMap<String, Long>()
++
+     fun log(tag: String, message: String, level: LogLevel = LogLevel.INFO) {
+         val entry = LogEntry(
+             id = idCounter.incrementAndGet(),
+@@ -42,6 +46,36 @@ object TerminalLog {
+         }
+     }
+ 
++    /**
++     * Adds a line, or rewrites the existing line registered under [key]. Used to show a transcript
++     * that grows while Gemini is still recognising speech, without spamming one line per fragment.
++     */
++    fun upsert(key: String, tag: String, message: String, level: LogLevel = LogLevel.INFO) {
++        val action = Runnable {
++            val existingId = keyedIds[key]
++            val index = if (existingId != null) entries.indexOfFirst { it.id == existingId } else -1
++            if (index >= 0) {
++                entries[index] = entries[index].copy(message = message, level = level)
++            } else {
++                val entry = LogEntry(
++                    id = idCounter.incrementAndGet(),
++                    timestamp = timeFormat.format(Date()),
++                    tag = tag,
++                    message = message,
++                    level = level
++                )
++                if (keyedIds.size > 100) keyedIds.clear()
++                keyedIds[key] = entry.id
++                addEntryInternal(entry)
++            }
++        }
++        if (Looper.myLooper() == Looper.getMainLooper()) {
++            action.run()
++        } else {
++            mainHandler.post(action)
++        }
++    }
++
+     private fun addEntryInternal(entry: LogEntry) {
+         while (entries.size >= MAX_ENTRIES) {
+             entries.removeAt(0)
+@@ -52,9 +86,11 @@ object TerminalLog {
+     fun clear() {
+         if (Looper.myLooper() == Looper.getMainLooper()) {
+             entries.clear()
++            keyedIds.clear()
+         } else {
+             mainHandler.post {
+                 entries.clear()
++                keyedIds.clear()
+             }
+         }
+     }
+diff --git a/DeskDroid/app/src/main/java/com/example/deskbot/ui/components/TerminalPanel.kt b/DeskDroid/app/src/main/java/com/example/deskbot/ui/components/TerminalPanel.kt
+index 5777ad1..c9474c6 100644
+--- a/DeskDroid/app/src/main/java/com/example/deskbot/ui/components/TerminalPanel.kt
++++ b/DeskDroid/app/src/main/java/com/example/deskbot/ui/components/TerminalPanel.kt
+@@ -150,6 +150,7 @@ private fun TerminalLogLine(entry: LogEntry) {
+         "BLE" -> CatppuccinBlue
+         "AUDIO" -> CatppuccinTeal
+         "GEMINI" -> CatppuccinMauve
++        "HEARD" -> CatppuccinYellow
+         "DISPLAY" -> CatppuccinPeach
+         "SYSTEM" -> CatppuccinOverlay1
+         else -> CatppuccinOverlay1
+diff --git a/README.md b/README.md
+index 934214d..b2395d1 100644
+--- a/README.md
++++ b/README.md
+@@ -23,8 +23,8 @@ DeskBot is an open-source, AI-powered desktop companion powered by an **ESP32-C3
+  │                           DeskDroid (Android)                          │
+  │                                                                        │
+  │   - Bridges BLE audio packets to WebSocket frames                      │
+- │   - Applies 6x software audio gain and peak amplitude monitoring       │
+- │   - Guards against silence / false triggers to prevent hallucinations  │
++ │   - Applies automatic gain control (AGC) and level monitoring           │
++ │   - Drops non-speech turns locally; shows what Gemini HEARD in Terminal │
+  └───────────────────────────────────┬────────────────────────────────────┘
+                                      │
+                    WebSocket (WSS) BidiGenerateContent
+@@ -80,7 +80,7 @@ DeskBot is an open-source, AI-powered desktop companion powered by an **ESP32-C3
+ ## BLE Protocol & GATT Specifications
+ 
+ - **Device Name:** `DeskBot`
+-- **Negotiated MTU:** Up to 517 bytes (negotiated automatically by DeskDroid)
++- **Negotiated MTU:** 247 bytes requested by DeskDroid (240-byte audio chunks fit); DeskDroid also requests `CONNECTION_PRIORITY_HIGH` so ~32 KB/s of PCM fits through the link
+ - **Primary Service UUID:** `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
+ 
+ | Characteristic | UUID | Properties | Format / Payload | Description |
+@@ -96,17 +96,17 @@ DeskBot is an open-source, AI-powered desktop companion powered by an **ESP32-C3
+ ## Core Capabilities
+ 
+ 1. **On-Device Voice Activity Detection (VAD):**
+-   - Samples audio continuously at 16,000 Hz via I2S DMA.
+-   - Calculates real-time Root-Mean-Square (RMS) amplitude with hardware bit shifting (`>> 14`).
+-   - Automatically detects speech start (`RMS > 120`), updates display to `"Listening..."`, and begins streaming BLE audio packets.
+-   - Automatically detects silence (`650 ms` timeout), updates display to `"Thinking..."`, sends `VOICE_END`, and stops BLE transmission.
+-
++   
++   - Samples audio continuously at 16,000 Hz via I2S DMA and removes the mic's DC bias with a one-pole DC-blocking filter (state kept across blocks).
++   - RMS is measured on the DC-free 16-bit signal. Speech starts when RMS exceeds `max(70, noiseFloor*3 + 30)` for 2 consecutive 16 ms blocks; an adaptive noise floor follows the room.
++   - A **320 ms pre-roll buffer** is sent first, so the beginning of the sentence is never clipped.
++   - While talking, only 50% of the start threshold keeps the turn open (hysteresis); `700 ms` of silence sends `VOICE_END` (hard cap: 20 s).
++   - Audio and `VOICE_START`/`VOICE_END` markers go through one FreeRTOS queue drained by a dedicated BLE task, so a slow BLE link or OLED redraw can never stall the I2S read loop.
+ 2. **Bidirectional Multimodal AI Streaming (Gemini Live):**
+-   - The Android companion buffers BLE audio packets into ~50 ms chunks (1600 bytes) and streams them via WebSocket `realtimeInput.mediaChunks` (`audio/pcm;rate=16000`).
+-   - Software gain (6x) amplifies subtle speech without clipping.
+-   - Turn completion commits user speech with `clientContent: { turnComplete: true }`.
+-   - Real-time text responses are extracted from `serverContent.outputTranscription.text` (and audio transcription) and streamed back to the OLED.
+-
++   
++   - The Android companion applies an AGC (target RMS ~3000, soft limiter), holds each turn back until >=120 ms of voiced audio is seen (clicks/hiss never reach Gemini), then streams 50 ms chunks via `realtimeInput.audio` (`audio/pcm;rate=16000`).
++   - A turn is committed by sending 500 ms of silence followed by `realtimeInput: { audioStreamEnd: true }`. **Never send an empty `clientContent: { turnComplete: true }`**: that makes Gemini answer from the accumulated conversation history instead of from your voice.
++   - `inputAudioTranscription` is shown live in the app's Terminal as a `[HEARD]` line (what Gemini recognised); the reply comes from `serverContent.outputTranscription` and is streamed to the OLED.
+ 3. **Dynamic OLED Word-Wrapping & Auto-Scroll:**
+    - Word wraps long text to 21 characters per line.
+    - Automatically scrolls to the newest lines if the text exceeds 8 lines (for 128x64) or 4 lines (for 128x32).
+@@ -152,7 +152,7 @@ Use this guide when diagnosing or resolving issues across the firmware, BLE, or
+ 
+ ### 1. Gemini Live WebSocket Closes Immediately (Error `1007: Precondition check failed`)
+ - **Cause:** Attempting to disable server-side VAD using `"realtimeInputConfig": { "automaticActivityDetection": { "disabled": true } }`, or sending manual `activityStart`/`activityEnd` packets. The `models/gemini-3.8-live` model rejects this payload.
+-- **Resolution:** Do **not** include `realtimeInputConfig` in `sendSetup()`. Let server-side detection remain enabled by default, and commit speech turns using `clientContent: { turnComplete: true }`.
++- **Resolution:** Do **not** include `realtimeInputConfig` in `sendSetup()`. Let server-side detection remain enabled by default, and end each speech turn with trailing silence + `realtimeInput: { audioStreamEnd: true }`.
+ 
+ ### 2. Gemini Live WebSocket Closes (Error `1007: The requested combination of response modalities (TEXT) is not supported`)
+ - **Cause:** `gemini-3.8-live` (audio-native live model) does not allow `responseModalities: ["TEXT"]`.
+@@ -164,8 +164,14 @@ Use this guide when diagnosing or resolving issues across the firmware, BLE, or
+   2. The firmware's `VAD_RMS_THRESHOLD` was set too high (e.g. `500`), so normal speech was cut off and only a mic tap or silence was sent.
+ - **Resolution:**
+   - Verify INMP441 **L/R** pin is soldered directly to **GND**.
+-  - Keep `VAD_RMS_THRESHOLD` around `100 - 150` with `>> 14` bit shift in `firmware.ino`.
+-  - Ensure the silence guard in `GeminiLiveManager.kt` is active: turns with `turnMaxPeak < 35` or fewer than 3 chunks are dropped before prompting Gemini.
++  - Tune `VAD_START_RMS_MIN` in `firmware.ino` (default `70`). Set `VAD_DEBUG 1` to print RMS / noise floor / thresholds to Serial and pick a value just above your room noise and well below your speech.
++  - Non-speech turns are dropped locally by `GeminiLiveManager.kt` (less than 120 ms of voiced audio) and logged as `Ignored non-speech turn` in the Terminal.
++
++### 3b. Gemini Answers About an Earlier Conversation / Doesn't React to What I Said
++
++- **Cause:** Ending turns with an empty `clientContent: { turnComplete: true }`. Per the Live API reference, `clientContent` is appended to the conversation history and `turnComplete` starts generation from that accumulated prompt, not from the realtime audio stream.
++- **Resolution:** Use `realtimeInput.audioStreamEnd` (see `sendEndOfTurn()`). Check the `[HEARD]` line in the Terminal: it shows exactly what Gemini recognised for each turn. `(no transcript)` means it answered without hearing speech: raise mic level / check wiring / lower `VAD_START_RMS_MIN`.
++- **If speech is recognised badly:** the Terminal warns `BLE delivered only ~N% of the expected audio` when packets are lost; check that the connection priority / MTU lines appear in the log.
+ 
+ ### 4. OLED Display Shows Nothing or Displays Garbage
+ - **Cause:** Incorrect I2C pins or bad display address.
+diff --git a/firmware/firmware.ino b/firmware/firmware.ino
+index dd3a3b7..ef0bfdd 100644
+--- a/firmware/firmware.ino
++++ b/firmware/firmware.ino
+@@ -9,6 +9,9 @@
+ #include <Wire.h>
+ #include <Adafruit_GFX.h>
+ #include <Adafruit_SSD1306.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++#include <freertos/queue.h>
+ 
+ I2SClass microphone;
+ 
+@@ -24,18 +27,55 @@ I2SClass microphone;
+ 
+ // --- Audio & VAD Configuration ---
+ #define AUDIO_SAMPLE_RATE     16000
+-#define I2S_BUFFER_SAMPLES    256
++#define I2S_BUFFER_SAMPLES    256   // 16 ms per block
+ #define BLE_AUDIO_CHUNK       240   // Max bytes per BLE notify (120 16-bit samples)
+-#define VAD_RMS_THRESHOLD     350   // AC RMS threshold after DC-offset removal
+-#define SILENCE_TIMEOUT_MS    650   // Silence duration to mark end of speech
+-#define MAX_VOICE_DURATION_MS 6000  // Hard cap (6s) so mic never streams forever
+-#define POST_TURN_COOLDOWN_MS 1500  // Pause mic for 1.5s after VOICE_END while waiting for reply
++
++// Digital gain applied to the DC-free 24-bit mic signal when converting to 16-bit PCM.
++// Kept modest on purpose: the Android app runs an AGC that brings speech to a good level
++// without clipping. (Old firmware: >>16 plus 2x, i.e. effectively the same as here.)
++#define DIGITAL_GAIN          2.0f
++
++// Voice activity detection. RMS is measured on the DC-free, gained 16-bit signal.
++// Start threshold = max(VAD_START_RMS_MIN, noiseFloor * VAD_NOISE_MULT + VAD_NOISE_MARGIN).
++// The old fixed threshold of 350 was ~6x too high for an INMP441: it only triggered on the loudest
++// syllables, cut off the start of every sentence and let quiet speech through as silence.
++#define VAD_START_RMS_MIN     70.0f
++#define VAD_NOISE_MULT        3.0f
++#define VAD_NOISE_MARGIN      30.0f
++#define VAD_KEEPALIVE_RATIO   0.5f  // while talking, only 50% of the start threshold keeps the turn open
++#define VAD_START_BLOCKS      2     // consecutive loud blocks (32 ms) needed to start; rejects clicks
++#define SILENCE_TIMEOUT_MS    700   // Silence duration to mark end of speech
++#define MAX_VOICE_DURATION_MS 20000 // Hard cap so the mic never streams forever
++#define POST_TURN_COOLDOWN_MS 300   // Short pause after VOICE_END (the device has no speaker to echo)
++#define PREROLL_BLOCKS        20    // 320 ms of audio kept from BEFORE the VAD triggered
++
++// BLE audio is sent from its own task through this queue, so a slow/congested BLE link or an
++// OLED redraw can never stall the I2S read loop (the I2S DMA only buffers 6 x 240 samples = 90 ms).
++#define AUDIO_QUEUE_DEPTH     128   // ~1 s of audio
++#define BLE_NOTIFY_GAP_MS     3     // pacing between notifications
++
++#define VAD_DEBUG             0     // 1 = print RMS / noise floor / threshold to Serial every 2 s
+ 
+ // --- I2S read buffer (32-bit from INMP441) ---
+ int32_t i2sReadBuffer[I2S_BUFFER_SAMPLES];
+ // --- 16-bit converted buffer for BLE transmission ---
+ int16_t audioSendBuffer[I2S_BUFFER_SAMPLES];
+ 
++// --- Pre-roll ring: the last PREROLL_BLOCKS blocks, sent first when speech is detected ---
++int16_t prerollBuffer[PREROLL_BLOCKS][I2S_BUFFER_SAMPLES];
++size_t prerollSamples[PREROLL_BLOCKS];
++int prerollHead = 0;   // next slot to write
++int prerollCount = 0;  // valid slots
++
++// --- BLE audio queue (filled by processAudio(), drained by bleSenderTask()) ---
++struct AudioPacket {
++  uint8_t len;
++  uint8_t isMarker;                // 1 = VOICE_START / VOICE_END text marker
++  uint8_t data[BLE_AUDIO_CHUNK];
++};
++QueueHandle_t audioQueue = nullptr;
++volatile uint32_t droppedAudioPackets = 0;
++
+ constexpr char DEVICE_NAME[] = "DeskBot";
+ constexpr char BLE_SERVICE_UUID[]  = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+ constexpr char BLE_COMMAND_UUID[]  = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+@@ -58,8 +98,13 @@ size_t writtenFirmwareBytes = 0;
+ bool isVoiceActive = false;
+ unsigned long voiceStartTimeMs = 0;
+ unsigned long lastVoiceTimeMs = 0;
+-unsigned long cooldownUntilMs = 0;
+-double noiseFloorRms = 50.0;
++unsigned long cooldownUntilMs = 1000; // ignore the DC-filter start-up transient after boot
++double noiseFloorRms = 20.0;
++int loudBlockCount = 0;
++
++// DC-blocking filter state (kept across blocks so block boundaries stay seamless)
++float dcPrevIn = 0.0f;
++float dcPrevOut = 0.0f;
+ 
+ // --- BLE connection state ---
+ bool bleConnected = false;
+@@ -148,11 +193,67 @@ void sendStatus(const char *message) {
+       statusCharacteristic->setValue(message);
+       statusCharacteristic->notify();
+     }
+-    if (audioCharacteristic != nullptr &&
+-        (strncmp(message, "VOICE_", 6) == 0)) {
+-      audioCharacteristic->setValue((uint8_t *)message, strlen(message));
+-      audioCharacteristic->notify();
++  }
++}
++
++// VOICE_START / VOICE_END go through the same queue as the audio so they can never overtake it.
++void enqueueMarker(const char *marker) {
++  Serial.println(marker);
++  if (audioQueue == nullptr) {
++    return;
++  }
++  AudioPacket pkt;
++  pkt.isMarker = 1;
++  pkt.len = (uint8_t)strlen(marker);
++  memcpy(pkt.data, marker, pkt.len);
++  if (xQueueSend(audioQueue, &pkt, pdMS_TO_TICKS(20)) != pdTRUE) {
++    droppedAudioPackets++;
++  }
++}
++
++void enqueueAudioBlock(const int16_t *samples, size_t sampleCount) {
++  if (audioQueue == nullptr) {
++    return;
++  }
++  const uint8_t *bytes = (const uint8_t *)samples;
++  const size_t total = sampleCount * sizeof(int16_t);
++  size_t offset = 0;
++  while (offset < total) {
++    size_t n = total - offset;
++    if (n > BLE_AUDIO_CHUNK) {
++      n = BLE_AUDIO_CHUNK;
+     }
++    AudioPacket pkt;
++    pkt.isMarker = 0;
++    pkt.len = (uint8_t)n;
++    memcpy(pkt.data, bytes + offset, n);
++    if (xQueueSend(audioQueue, &pkt, 0) != pdTRUE) {
++      droppedAudioPackets++;
++    }
++    offset += n;
++  }
++}
++
++// Runs in its own FreeRTOS task: paces BLE notifications so the main loop never blocks on them.
++void bleSenderTask(void *param) {
++  AudioPacket pkt;
++  for (;;) {
++    if (xQueueReceive(audioQueue, &pkt, portMAX_DELAY) != pdTRUE) {
++      continue;
++    }
++    if (!bleConnected || audioCharacteristic == nullptr) {
++      continue;  // nobody listening: drop
++    }
++    if (pkt.isMarker) {
++      if (statusCharacteristic != nullptr) {
++        statusCharacteristic->setValue(pkt.data, pkt.len);
++        statusCharacteristic->notify();
++        vTaskDelay(pdMS_TO_TICKS(BLE_NOTIFY_GAP_MS));
++      }
++    }
++    audioCharacteristic->setValue(pkt.data, pkt.len);
++    audioCharacteristic->notify();
++    vTaskDelay(pdMS_TO_TICKS(BLE_NOTIFY_GAP_MS));
+   }
+ }
+ 
+@@ -175,7 +276,10 @@ class DeskBotServerCallbacks : public BLEServerCallbacks {
+   void onConnect(BLEServer *server) override {
+     bleConnected = true;
+     isVoiceActive = false;
+-    cooldownUntilMs = millis() + 2000; // Wait 2s after BLE connect before enabling VAD
++    loudBlockCount = 0;
++    prerollCount = 0;
++    if (audioQueue != nullptr) xQueueReset(audioQueue);
++    cooldownUntilMs = millis() + 2000; // Wait 2s after BLE connect (MTU / CCCD setup) before enabling VAD
+     queueDisplayText("Connected!");
+     Serial.println("BLE client connected.");
+   }
+@@ -183,6 +287,8 @@ class DeskBotServerCallbacks : public BLEServerCallbacks {
+   void onDisconnect(BLEServer *server) override {
+     bleConnected = false;
+     isVoiceActive = false;
++    loudBlockCount = 0;
++    if (audioQueue != nullptr) xQueueReset(audioQueue);
+     displayAccumBuffer = "";
+     queueDisplayText("DeskBot Ready\nWaiting for BLE...");
+     Serial.println("BLE client disconnected.");
+@@ -333,25 +439,18 @@ void startBle() {
+ }
+ 
+ // =========================================================
+-// Audio Processing & BLE Transmission (with DC Offset Removal)
++// Audio Processing, VAD and pre-roll
+ // =========================================================
+-void sendAudioBufferOverBle(size_t samplesRead) {
+-  if (!bleConnected || audioCharacteristic == nullptr) {
+-    return;
+-  }
+-  size_t totalBytes = samplesRead * sizeof(int16_t);
+-  size_t offset = 0;
+-  while (offset < totalBytes) {
+-    size_t chunkSize = totalBytes - offset;
+-    if (chunkSize > BLE_AUDIO_CHUNK) {
+-      chunkSize = BLE_AUDIO_CHUNK;
+-    }
+-    audioCharacteristic->setValue((uint8_t *)audioSendBuffer + offset, chunkSize);
+-    audioCharacteristic->notify();
+-    offset += chunkSize;
+-    if (offset < totalBytes) {
+-      delay(4);
+-    }
++void endVoiceTurn(unsigned long now, const char *reason) {
++  isVoiceActive = false;
++  loudBlockCount = 0;
++  cooldownUntilMs = now + POST_TURN_COOLDOWN_MS;
++  enqueueMarker("VOICE_END");
++  queueDisplayText("Thinking...");
++  Serial.printf("VAD: Voice ended (%s)\n", reason);
++  if (droppedAudioPackets > 0) {
++    Serial.printf("WARNING: %u audio packets dropped (BLE too slow?)\n", (unsigned)droppedAudioPackets);
++    droppedAudioPackets = 0;
+   }
+ }
+ 
+@@ -364,77 +463,97 @@ void processAudio() {
+     return;
+   }
+ 
+-  // Do not process or stream audio until BLE is connected
+-  if (!bleConnected) {
+-    return;
+-  }
+-
+   unsigned long now = millis();
+-  if (now < cooldownUntilMs) {
+-    return;
+-  }
+ 
+-  // PASS 1: Compute DC offset (mean of block) so INMP441 static DC bias
+-  // does not falsely keep RMS above VAD_RMS_THRESHOLD in silence!
+-  int64_t sum = 0;
++  // 1) Convert INMP441 24-bit-in-32 samples to gained 16-bit PCM. A one-pole DC blocker with state
++  //    kept across blocks removes the mic's DC bias (the old per-block mean subtraction put a step
++  //    at every 16 ms block boundary = audible 62 Hz buzz that hurt speech recognition).
++  //    This always runs - even while idle or disconnected - so the filter and noise floor are
++  //    settled before the first utterance.
++  double sumSquares = 0.0;
+   for (size_t i = 0; i < samplesRead; i++) {
+-    int16_t raw16 = (int16_t)(i2sReadBuffer[i] >> 16);
+-    audioSendBuffer[i] = raw16;
+-    sum += raw16;
++    float x = (float)(i2sReadBuffer[i] >> 8);            // signed 24-bit sample
++    float y = x - dcPrevIn + 0.995f * dcPrevOut;         // DC blocker (~13 Hz corner)
++    dcPrevIn = x;
++    dcPrevOut = y;
++    float v = y * (DIGITAL_GAIN / 256.0f);               // 24-bit -> 16-bit scale, with gain
++    if (v > 32767.0f) v = 32767.0f;
++    if (v < -32768.0f) v = -32768.0f;
++    audioSendBuffer[i] = (int16_t)v;
++    sumSquares += (double)v * (double)v;
+   }
+-  int16_t dcOffset = (int16_t)(sum / (int64_t)samplesRead);
+-
+-  // PASS 2: Subtract DC offset and compute true AC voice RMS
+-  int64_t sumSquares = 0;
+-  for (size_t i = 0; i < samplesRead; i++) {
+-    int32_t centered = (int32_t)audioSendBuffer[i] - (int32_t)dcOffset;
+-    // Apply 2x gain (+6 dB) to AC speech signal with clamping
+-    centered *= 2;
+-    if (centered > 32767) centered = 32767;
+-    if (centered < -32768) centered = -32768;
+-    audioSendBuffer[i] = (int16_t)centered;
+-    sumSquares += (int64_t)centered * (int64_t)centered;
++  double rms = sqrt(sumSquares / (double)samplesRead);
++
++  // 2) Adaptive noise floor + thresholds (hysteresis: lower threshold keeps an open turn alive).
++  double startThreshold = fmax((double)VAD_START_RMS_MIN,
++                               noiseFloorRms * VAD_NOISE_MULT + VAD_NOISE_MARGIN);
++  double keepThreshold = startThreshold * VAD_KEEPALIVE_RATIO;
++
++  if (!isVoiceActive) {
++    // Follow ambient noise quickly when it is quiet, very slowly when it is loud, so a permanently
++    // noisier room eventually stops being treated as speech.
++    double rate = (rms < startThreshold) ? 0.02 : 0.002;
++    noiseFloorRms = (1.0 - rate) * noiseFloorRms + rate * rms;
+   }
+-  double rms = sqrt((double)sumSquares / (double)samplesRead);
+ 
+-  // Update adaptive ambient noise floor when not speaking
+-  if (!isVoiceActive && rms < VAD_RMS_THRESHOLD) {
+-    noiseFloorRms = 0.95 * noiseFloorRms + 0.05 * rms;
++#if VAD_DEBUG
++  static unsigned long lastDebugMs = 0;
++  if (now - lastDebugMs >= 2000) {
++    lastDebugMs = now;
++    Serial.printf("[VAD] rms=%.0f noise=%.0f start=%.0f keep=%.0f\n", rms, noiseFloorRms, startThreshold, keepThreshold);
+   }
++#endif
++
++  // Before the turn starts, every block goes into the pre-roll ring.
++  if (!isVoiceActive) {
++    memcpy(prerollBuffer[prerollHead], audioSendBuffer, samplesRead * sizeof(int16_t));
++    prerollSamples[prerollHead] = samplesRead;
++    prerollHead = (prerollHead + 1) % PREROLL_BLOCKS;
++    if (prerollCount < PREROLL_BLOCKS) prerollCount++;
++
++    if (!bleConnected || now < cooldownUntilMs) {
++      loudBlockCount = 0;
++      return;
++    }
+ 
+-  double dynamicThreshold = fmax((double)VAD_RMS_THRESHOLD, noiseFloorRms * 2.5 + 150.0);
++    if (rms > startThreshold) {
++      loudBlockCount++;
++    } else {
++      loudBlockCount = 0;
++    }
+ 
+-  if (rms > dynamicThreshold) {
+-    if (!isVoiceActive) {
++    if (loudBlockCount >= VAD_START_BLOCKS) {
+       isVoiceActive = true;
+       voiceStartTimeMs = now;
+-      sendStatus("VOICE_START");
+-      displayText("Listening...");
+-      Serial.printf("VAD: Voice started (RMS=%.0f, thresh=%.0f)\n", rms, dynamicThreshold);
++      lastVoiceTimeMs = now;
++      loudBlockCount = 0;
++      enqueueMarker("VOICE_START");
++
++      // Send the audio from just BEFORE the trigger (oldest first, includes the current block),
++      // so the first syllables of the sentence are not cut off.
++      int first = (prerollHead - prerollCount + PREROLL_BLOCKS) % PREROLL_BLOCKS;
++      for (int k = 0; k < prerollCount; k++) {
++        int idx = (first + k) % PREROLL_BLOCKS;
++        enqueueAudioBlock(prerollBuffer[idx], prerollSamples[idx]);
++      }
++      prerollCount = 0;
++
++      queueDisplayText("Listening...");
++      Serial.printf("VAD: Voice started (RMS=%.0f, thresh=%.0f, noise=%.0f)\n", rms, startThreshold, noiseFloorRms);
+     }
++    return;
++  }
++
++  // Turn is open: stream everything (including natural pauses) until real silence.
++  enqueueAudioBlock(audioSendBuffer, samplesRead);
++  if (rms > keepThreshold) {
+     lastVoiceTimeMs = now;
+-    sendAudioBufferOverBle(samplesRead);
+-
+-    // Safety cap: if voice remains active for > 6 seconds, force end-of-turn
+-    if (now - voiceStartTimeMs >= MAX_VOICE_DURATION_MS) {
+-      isVoiceActive = false;
+-      cooldownUntilMs = now + POST_TURN_COOLDOWN_MS;
+-      sendStatus("VOICE_END");
+-      displayText("Thinking...");
+-      Serial.println("VAD: Max voice duration reached -> VOICE_END");
+-    }
+-  } else if (isVoiceActive) {
+-    // Below threshold - send trailing audio until silence timeout
+-    sendAudioBufferOverBle(samplesRead);
+-
+-    if (now - lastVoiceTimeMs >= SILENCE_TIMEOUT_MS ||
+-        now - voiceStartTimeMs >= MAX_VOICE_DURATION_MS) {
+-      isVoiceActive = false;
+-      cooldownUntilMs = now + POST_TURN_COOLDOWN_MS;
+-      sendStatus("VOICE_END");
+-      displayText("Thinking...");
+-      Serial.println("VAD: Voice ended");
+-    }
++  }
++
++  if (now - voiceStartTimeMs >= MAX_VOICE_DURATION_MS) {
++    endVoiceTurn(now, "max duration");
++  } else if (now - lastVoiceTimeMs >= SILENCE_TIMEOUT_MS) {
++    endVoiceTurn(now, "silence");
+   }
+ }
+ 
+@@ -443,10 +562,18 @@ void processAudio() {
+ // =========================================================
+ void setup() {
+   Serial.begin(115200);
++
++  audioQueue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(AudioPacket));
++  if (audioQueue == nullptr) {
++    Serial.println("Failed to allocate audio queue!");
++  }
++  xTaskCreate(bleSenderTask, "bleTx", 4096, nullptr, 2, nullptr);
++
+   startBle();
+   delay(1500);
+ 
+   Wire.begin(DISPLAY_SDA, DISPLAY_SCL);
++  Wire.setClock(400000);
+ 
+   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+     Serial.println(F("SSD1306 allocation failed"));

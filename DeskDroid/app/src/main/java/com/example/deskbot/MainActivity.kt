@@ -681,6 +681,11 @@ class MainActivity : ComponentActivity() {
                 android.os.Handler(mainLooper).postDelayed({
                     if (!isConnected || activeGatt !== gatt) return@postDelayed
                     try {
+                        // ~32 KB/s of raw PCM does not fit through the default 30-50 ms connection
+                        // interval; without this the ESP32 drops audio packets and Gemini hears garbled speech.
+                        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    } catch (_: Exception) {}
+                    try {
                         gatt.requestMtu(247)
                     } catch (_: Exception) {}
                 }, 900)
@@ -709,14 +714,14 @@ class MainActivity : ComponentActivity() {
                     // Check if the packet is a VOICE_START / VOICE_END control marker sent over audioChar
                     if (value.size <= 16) {
                         val marker = String(value, Charsets.UTF_8).trim()
-                        if (marker.contains("VOICE_START", ignoreCase = true)) {
+                        if (marker == "VOICE_START") {
                             receivedAudioPacketCount = 0
                             runOnUiThread {
                                 TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
                             }
                             geminiManager?.sendStartOfTurn()
                             return
-                        } else if (marker.contains("VOICE_END", ignoreCase = true)) {
+                        } else if (marker == "VOICE_END") {
                             val totalPackets = receivedAudioPacketCount
                             receivedAudioPacketCount = 0
                             runOnUiThread {
@@ -1156,7 +1161,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startAiSession() {
-        if (GeminiLiveManager.API_KEY == "YOUR_GEMINI_API_KEY") {
+        if (GeminiLiveManager.API_KEY == "YOUR_GEMINI_API_KEY" || GeminiLiveManager.API_KEY == "API_KEY" || GeminiLiveManager.API_KEY.isBlank()) {
             Toast.makeText(this, "Please configure your Gemini API Key in GeminiLiveManager.kt", Toast.LENGTH_LONG).show()
             TerminalLog.log("GEMINI", "Warning: API key is set to default placeholder in GeminiLiveManager.kt", LogLevel.WARN)
         }

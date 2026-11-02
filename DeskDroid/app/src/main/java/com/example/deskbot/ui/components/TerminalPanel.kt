@@ -150,6 +150,7 @@ private fun TerminalLogLine(entry: LogEntry) {
         "BLE" -> CatppuccinBlue
         "AUDIO" -> CatppuccinTeal
         "GEMINI" -> CatppuccinMauve
+        "HEARD" -> CatppuccinYellow
         "DISPLAY" -> CatppuccinPeach
         "SYSTEM" -> CatppuccinOverlay1
         else -> CatppuccinOverlay1
