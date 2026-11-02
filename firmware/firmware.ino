@@ -2,6 +2,7 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#include <BLE2902.h>
 #include <Update.h>
 #include <ESP_I2S.h>
 #include <math.h>
@@ -19,22 +20,20 @@ I2SClass microphone;
 #define DISPLAY_SDA 2
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64 // Change to 32 if using a 128x32 display
-#define OLED_RESET    -1
+#define OLED_RESET   -1
 
 // --- Audio Configuration ---
-#define AUDIO_SAMPLE_RATE   16000
-#define I2S_BUFFER_SAMPLES  256
-#define BLE_AUDIO_CHUNK     240   // Max bytes per BLE notify (~120 16-bit samples)
-#define VAD_RMS_THRESHOLD   500
-#define SILENCE_TIMEOUT_MS  500
+#define AUDIO_SAMPLE_RATE  16000
+#define I2S_BUFFER_SAMPLES 256
+#define BLE_AUDIO_CHUNK    240   // Max bytes per BLE notify (~120 16-bit samples)
+#define VAD_RMS_THRESHOLD  500
+#define SILENCE_TIMEOUT_MS 600
 
 // --- I2S read buffer (32-bit from INMP441) ---
 int32_t i2sReadBuffer[I2S_BUFFER_SAMPLES];
 // --- 16-bit converted buffer for BLE transmission ---
 int16_t audioSendBuffer[I2S_BUFFER_SAMPLES];
 
-// ESP32-C3 supports Bluetooth Low Energy (BLE), not Bluetooth Classic SPP.
-// The Android app checks GitHub, downloads the binary, then sends it here.
 constexpr char DEVICE_NAME[] = "DeskBot";
 constexpr char BLE_SERVICE_UUID[]  = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 constexpr char BLE_COMMAND_UUID[]  = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -60,48 +59,45 @@ unsigned long lastVoiceTimeMs = 0;
 // --- BLE connection state ---
 bool bleConnected = false;
 
-// --- Display text accumulation buffer ---
+// --- Display text accumulation buffer (rendered on main loop) ---
 String displayAccumBuffer = "";
+String pendingDisplayMessage = "";
+volatile bool hasPendingDisplayUpdate = false;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ============================================================
+// =========================================================
 // OLED Display Helper
-// ============================================================
+// =========================================================
 void displayText(const char* text) {
   display.clearDisplay();
   display.setTextSize(1);       // 6x8 pixels per character
   display.setTextColor(SSD1306_WHITE);
 
-  const int maxCharsPerLine = 21;  // 128 / 6 = 21 chars per line
-  const int maxLines = 8;          // 64 / 8 = 8 lines
+  const int maxCharsPerLine = 21; // 128 / 6 = 21 chars per line
+  const int maxLines = SCREEN_HEIGHT / 8;
 
-  // Word-wrap the text into lines
-  String lines[64];  // generous upper bound
+  String lines[64];
   int lineCount = 0;
   String input(text);
   int pos = 0;
   int len = input.length();
 
   while (pos < len && lineCount < 64) {
-    // Check for explicit newline
     int nlPos = input.indexOf('\n', pos);
     int segEnd = (nlPos >= 0 && nlPos < pos + maxCharsPerLine) ? nlPos : -1;
 
     if (segEnd >= 0) {
-      // Newline found within current line width
       lines[lineCount++] = input.substring(pos, segEnd);
       pos = segEnd + 1;
       continue;
     }
 
-    // No newline within range; check if remaining text fits on one line
     if (pos + maxCharsPerLine >= len) {
       lines[lineCount++] = input.substring(pos);
       break;
     }
 
-    // Find last space within maxCharsPerLine for word wrap
     int wrapAt = -1;
     for (int i = pos + maxCharsPerLine; i > pos; i--) {
       if (input.charAt(i) == ' ') {
@@ -112,15 +108,13 @@ void displayText(const char* text) {
 
     if (wrapAt > pos) {
       lines[lineCount++] = input.substring(pos, wrapAt);
-      pos = wrapAt + 1; // skip the space
+      pos = wrapAt + 1;
     } else {
-      // No space found; hard-break at maxCharsPerLine
       lines[lineCount++] = input.substring(pos, pos + maxCharsPerLine);
       pos += maxCharsPerLine;
     }
   }
 
-  // If text is longer than 8 lines, show the last 8 lines (scroll to bottom)
   int startLine = 0;
   if (lineCount > maxLines) {
     startLine = lineCount - maxLines;
@@ -134,21 +128,33 @@ void displayText(const char* text) {
   display.display();
 }
 
-// ============================================================
+void queueDisplayText(const String &text) {
+  pendingDisplayMessage = text;
+  hasPendingDisplayUpdate = true;
+}
+
+// =========================================================
 // BLE Status Helper
-// ============================================================
+// =========================================================
 void sendStatus(const char *message) {
   Serial.println(message);
-  if (statusCharacteristic != nullptr && bleServer != nullptr &&
-      bleServer->getConnectedCount() > 0) {
-    statusCharacteristic->setValue(message);
-    statusCharacteristic->notify();
+  if (bleServer != nullptr && bleServer->getConnectedCount() > 0) {
+    if (statusCharacteristic != nullptr) {
+      statusCharacteristic->setValue(message);
+      statusCharacteristic->notify();
+    }
+    // Also send VOICE_START / VOICE_END markers over audioCharacteristic as fallback
+    if (audioCharacteristic != nullptr &&
+        (strncmp(message, "VOICE_", 6) == 0)) {
+      audioCharacteristic->setValue((uint8_t *)message, strlen(message));
+      audioCharacteristic->notify();
+    }
   }
 }
 
-// ============================================================
+// =========================================================
 // OTA Helpers
-// ============================================================
+// =========================================================
 void resetOta() {
   if (otaInProgress) {
     Update.abort();
@@ -158,13 +164,13 @@ void resetOta() {
   writtenFirmwareBytes = 0;
 }
 
-// ============================================================
+// =========================================================
 // BLE Callbacks
-// ============================================================
+// =========================================================
 class DeskBotServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *server) override {
     bleConnected = true;
-    displayText("Connected!");
+    queueDisplayText("Connected!");
     Serial.println("BLE client connected.");
   }
 
@@ -172,10 +178,8 @@ class DeskBotServerCallbacks : public BLEServerCallbacks {
     bleConnected = false;
     isVoiceActive = false;
     displayAccumBuffer = "";
-    displayText("Disconnected");
+    queueDisplayText("DeskBot Ready\nWaiting for BLE...");
     Serial.println("BLE client disconnected.");
-    delay(500);
-    displayText("DeskBot Ready\nWaiting for BLE...");
     server->startAdvertising();
   }
 };
@@ -186,14 +190,12 @@ class FirmwareDataCallbacks : public BLECharacteristicCallbacks {
       return;
     }
 
-    // Use the raw buffer: getValue() returns Arduino String in ESP32 core 3.x
-    // and cannot safely represent arbitrary firmware bytes.
     uint8_t *data = characteristic->getData();
     const size_t dataLength = characteristic->getLength();
     const size_t remaining = expectedFirmwareBytes - writtenFirmwareBytes;
     if (data == nullptr || dataLength == 0 || dataLength > remaining ||
         Update.write(data, dataLength) != dataLength) {
-      sendStatus("[OTA] Firmware write failed.");
+      sendStatus("OTA Firmware write failed.");
       resetOta();
       return;
     }
@@ -211,16 +213,16 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
       resetOta();
       const size_t imageSize = command.substring(10).toInt();
       if (imageSize == 0 || !Update.begin(imageSize, U_FLASH)) {
-        sendStatus("[OTA] Cannot start update.");
+        sendStatus("OTA] Cannot start update.");
         return;
       }
       expectedFirmwareBytes = imageSize;
       writtenFirmwareBytes = 0;
       otaInProgress = true;
-      sendStatus("[OTA] Receiving firmware.");
+      sendStatus("OTA] Receiving firmware.");
     } else if (command == "OTA_ABORT") {
       resetOta();
-      sendStatus("[OTA] Cancelled.");
+      sendStatus("OTA] Cancelled.");
     } else if (command == "OTA_END") {
       if (!otaInProgress || writtenFirmwareBytes != expectedFirmwareBytes || !Update.end()) {
         sendStatus("[OTA] Finalization failed.");
@@ -251,18 +253,11 @@ class DisplayTextCallbacks : public BLECharacteristicCallbacks {
 
     displayAccumBuffer += chunk;
 
-    // Check for end-of-message markers
     bool shouldDisplay = false;
-    if (displayAccumBuffer.endsWith("DISPLAY_END")) {
-      // Remove the marker before displaying
-      displayAccumBuffer = displayAccumBuffer.substring(
-          0, displayAccumBuffer.length() - 11);
+    int endMarkerIdx = displayAccumBuffer.indexOf("DISPLAY_END");
+    if (endMarkerIdx >= 0) {
+      displayAccumBuffer = displayAccumBuffer.substring(0, endMarkerIdx);
       shouldDisplay = true;
-    } else if (displayAccumBuffer.indexOf('\n') >= 0 &&
-               !displayAccumBuffer.endsWith("\n")) {
-      // Contains a newline but doesn't end with one — could be partial.
-      // Only auto-display on DISPLAY_END or when a single complete write
-      // ends with newline.
     } else if (displayAccumBuffer.endsWith("\n")) {
       shouldDisplay = true;
     }
@@ -270,45 +265,59 @@ class DisplayTextCallbacks : public BLECharacteristicCallbacks {
     if (shouldDisplay) {
       displayAccumBuffer.trim();
       if (displayAccumBuffer.length() > 0) {
-        displayText(displayAccumBuffer.c_str());
+        queueDisplayText(displayAccumBuffer);
       }
       displayAccumBuffer = "";
     }
   }
 };
 
-// ============================================================
+// =========================================================
 // BLE Initialization
-// ============================================================
+// =========================================================
 void startBle() {
   BLEDevice::init(DEVICE_NAME);
+  BLEDevice::setMTU(517);
+
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new DeskBotServerCallbacks());
 
   // Allocate 30 handles for characteristics + descriptors
   BLEService *service = bleServer->createService(BLEUUID(String(BLE_SERVICE_UUID)), 30);
 
-  // Command characteristic (WRITE) — receives OTA commands, etc.
+  // Command characteristic (WRITE) - receives OTA commands, etc.
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       BLE_COMMAND_UUID,
       BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
 
-  // The standard Nordic UART TX characteristic. ESP32-C3's NimBLE stack
-  // automatically provides its writable CCCD descriptor for notifications.
+  // Status characteristic (READ + NOTIFY)
   statusCharacteristic = service->createCharacteristic(
-      BLE_STATUS_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+      BLE_STATUS_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+#if !defined(CONFIG_NIMBLE_ENABLED)
+  BLE2902 *status2902 = new BLE2902();
+  status2902->setNotifications(true);
+  statusCharacteristic->addDescriptor(status2902);
+#endif
 
-  // Firmware data characteristic (WRITE) — receives OTA binary chunks
+  // Firmware data characteristic (WRITE) - receives OTA binary chunks
   BLECharacteristic *firmwareCharacteristic = service->createCharacteristic(
       BLE_FIRMWARE_UUID, BLECharacteristic::PROPERTY_WRITE);
 
-  // Audio characteristic (NOTIFY) — sends 16-bit PCM audio chunks
+  // Audio characteristic (READ + NOTIFY) - sends 16-bit PCM audio chunks
   audioCharacteristic = service->createCharacteristic(
-      BLE_AUDIO_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+      BLE_AUDIO_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+#if !defined(CONFIG_NIMBLE_ENABLED)
+  BLE2902 *audio2902 = new BLE2902();
+  audio2902->setNotifications(true);
+  audioCharacteristic->addDescriptor(audio2902);
+#endif
 
-  // Display text characteristic (WRITE) — receives text to show on OLED
+  // Display text characteristic (WRITE) - receives text to show on OLED
   displayCharacteristic = service->createCharacteristic(
-      BLE_DISPLAY_UUID, BLECharacteristic::PROPERTY_WRITE);
+      BLE_DISPLAY_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
 
   // Set callbacks
   commandCharacteristic->setCallbacks(new CommandCallbacks());
@@ -324,9 +333,9 @@ void startBle() {
   advertising->start();
 }
 
-// ============================================================
+// =========================================================
 // Audio Processing & BLE Transmission
-// ============================================================
+// =========================================================
 void processAudio() {
   // Read I2S samples (32-bit from INMP441)
   size_t bytesRead = microphone.readBytes(
@@ -337,7 +346,7 @@ void processAudio() {
     return;
   }
 
-  // Convert 32-bit to 16-bit and calculate RMS
+  // Convert 32-bit to 16-bit and calculate RMS (same >> 16 scale as original)
   int64_t sumSquares = 0;
   for (size_t i = 0; i < samplesRead; i++) {
     int16_t sample16 = (int16_t)(i2sReadBuffer[i] >> 16);
@@ -371,11 +380,13 @@ void processAudio() {
             (uint8_t *)audioSendBuffer + offset, chunkSize);
         audioCharacteristic->notify();
         offset += chunkSize;
+        if (offset < totalBytes) {
+          delay(3); // Brief spacing so BLE TX buffer does not drop packets
+        }
       }
     }
   } else if (isVoiceActive) {
-    // Below threshold — still send audio until silence timeout
-    // (captures trailing speech)
+    // Below threshold - still send audio until silence timeout
     if (bleConnected && audioCharacteristic != nullptr) {
       size_t totalBytes = samplesRead * sizeof(int16_t);
       size_t offset = 0;
@@ -388,6 +399,9 @@ void processAudio() {
             (uint8_t *)audioSendBuffer + offset, chunkSize);
         audioCharacteristic->notify();
         offset += chunkSize;
+        if (offset < totalBytes) {
+          delay(3);
+        }
       }
     }
 
@@ -395,14 +409,15 @@ void processAudio() {
     if (now - lastVoiceTimeMs >= SILENCE_TIMEOUT_MS) {
       isVoiceActive = false;
       sendStatus("VOICE_END");
+      displayText("Thinking...");
       Serial.println("VAD: Voice ended");
     }
   }
 }
 
-// ============================================================
+// =========================================================
 // Setup
-// ============================================================
+// =========================================================
 void setup() {
   Serial.begin(115200);
   startBle();
@@ -417,18 +432,18 @@ void setup() {
 
   // BCLK, WS, DOUT (unused), DIN
   microphone.setPins(
-    I2S_SCK,
-    I2S_WS,
-    -1,
-    I2S_SD
+      I2S_SCK,
+      I2S_WS,
+      -1,
+      I2S_SD
   );
 
   if (!microphone.begin(
-        I2S_MODE_STD,
-        AUDIO_SAMPLE_RATE,
-        I2S_DATA_BIT_WIDTH_32BIT,
-        I2S_SLOT_MODE_MONO,
-        I2S_STD_SLOT_LEFT
+          I2S_MODE_STD,
+          AUDIO_SAMPLE_RATE,
+          I2S_DATA_BIT_WIDTH_32BIT,
+          I2S_SLOT_MODE_MONO,
+          I2S_STD_SLOT_LEFT
       )) {
     Serial.println("I2S initialization failed!");
     displayText("I2S FAILED!");
@@ -441,10 +456,16 @@ void setup() {
   displayText("DeskBot Ready\nWaiting for BLE...");
 }
 
-// ============================================================
+// =========================================================
 // Main Loop
-// ============================================================
+// =========================================================
 void loop() {
+  if (hasPendingDisplayUpdate) {
+    hasPendingDisplayUpdate = false;
+    String msgToRender = pendingDisplayMessage;
+    displayText(msgToRender.c_str());
+  }
+
   // Skip audio processing during OTA to avoid contention
   if (otaInProgress) {
     delay(20);
