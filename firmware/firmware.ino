@@ -109,15 +109,27 @@ float dcPrevOut = 0.0f;
 // --- BLE connection state ---
 bool bleConnected = false;
 
-// --- Display text accumulation buffer (rendered on main loop) ---
+// --- Display text accumulation buffer (for BLE chunked reception) ---
 String displayAccumBuffer = "";
-String pendingDisplayMessage = "";
-volatile bool hasPendingDisplayUpdate = false;
+
+// --- Display animation state machine ---
+enum class DisplayState {
+  IDLE,
+  LISTENING,
+  SPEAKING,
+  THINKING
+};
+
+volatile DisplayState currentDisplayState = DisplayState::IDLE;
+volatile DisplayState targetDisplayState  = DisplayState::IDLE;
+unsigned long lastAnimFrameMs = 0;
+int animFrame = 0;
+String speakingText = ""; // stores the Gemini reply text shown while SPEAKING
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // =========================================================
-// OLED Display Helper
+// OLED Display Helpers — Static text (boot/error messages only)
 // =========================================================
 void displayText(const char* text) {
   display.clearDisplay();
@@ -179,8 +191,132 @@ void displayText(const char* text) {
 }
 
 void queueDisplayText(const String &text) {
-  pendingDisplayMessage = text;
-  hasPendingDisplayUpdate = true;
+  // Routes display intent to the animation state machine.
+  // Called from BLE callbacks (BLE thread); targetDisplayState is volatile.
+  if (text == "Listening...") {
+    targetDisplayState = DisplayState::LISTENING;
+  } else if (text == "Thinking...") {
+    targetDisplayState = DisplayState::THINKING;
+  } else if (text.startsWith("DeskBot") || text == "Connected!") {
+    targetDisplayState = DisplayState::IDLE;
+  } else {
+    // Gemini reply text sent from Android → show SPEAKING animation
+    speakingText = text;
+    targetDisplayState = DisplayState::SPEAKING;
+  }
+}
+
+// =========================================================
+// OLED Animated State Drawing Functions
+// =========================================================
+
+// IDLE — Robot eyes with periodic blink every 3 s (150 ms blink duration)
+void drawIdleState(unsigned long now) {
+  bool isBlinking = (now % 3000) < 150;
+  display.clearDisplay();
+  int eyeH = isBlinking ? 4 : 20;
+  // Left eye
+  display.fillRoundRect(26, 28 - eyeH / 2, 28, eyeH, eyeH / 2, SSD1306_WHITE);
+  // Right eye
+  display.fillRoundRect(74, 28 - eyeH / 2, 28, eyeH, eyeH / 2, SSD1306_WHITE);
+  if (!isBlinking) {
+    // Eye shine / highlight dots
+    display.fillRect(32, 22, 3, 3, SSD1306_BLACK);
+    display.fillRect(80, 22, 3, 3, SSD1306_BLACK);
+  }
+  display.display();
+}
+
+// LISTENING — Animated soundwave bars
+void drawListeningState(unsigned long now) {
+  display.clearDisplay();
+  const int numBars = 7;
+  const int barW    = 8;
+  const int gap     = 6;
+  const int totalW  = numBars * barW + (numBars - 1) * gap;
+  const int startX  = (128 - totalW) / 2;
+  const int centerY = 32;
+  float phase = (now % 800) / 800.0f * 2 * PI;
+  for (int i = 0; i < numBars; i++) {
+    float wave = sin(phase + i * 0.7f);
+    int h = (int)(10 + 18 * ((wave + 1) / 2.0f));
+    int x = startX + i * (barW + gap);
+    display.fillRoundRect(x, centerY - h / 2, barW, h, 3, SSD1306_WHITE);
+  }
+  display.display();
+}
+
+// SPEAKING — Eyes (no blink) + small soundwave at mouth area
+void drawSpeakingState(unsigned long now) {
+  display.clearDisplay();
+  // Eyes
+  display.fillRoundRect(26, 18, 28, 20, 10, SSD1306_WHITE);
+  display.fillRoundRect(74, 18, 28, 20, 10, SSD1306_WHITE);
+  display.fillRect(32, 20, 3, 3, SSD1306_BLACK);
+  display.fillRect(80, 20, 3, 3, SSD1306_BLACK);
+  // Small soundwave at mouth area (y≈52)
+  const int numBars = 5;
+  const int barW    = 5;
+  const int gap     = 4;
+  const int totalW  = numBars * barW + (numBars - 1) * gap;
+  const int startX  = (128 - totalW) / 2;
+  float phase = (now % 600) / 600.0f * 2 * PI;
+  for (int i = 0; i < numBars; i++) {
+    float wave = sin(phase + i * 0.9f);
+    int h = (int)(4 + 8 * ((wave + 1) / 2.0f));
+    int x = startX + i * (barW + gap);
+    display.fillRoundRect(x, 52 - h / 2, barW, h, 2, SSD1306_WHITE);
+  }
+  display.display();
+}
+
+// THINKING — Eyes looking upward + animated thinking dots
+void drawThinkingState(unsigned long now) {
+  display.clearDisplay();
+  // Eye whites
+  display.fillRoundRect(26, 18, 28, 22, 10, SSD1306_WHITE);
+  display.fillRoundRect(74, 18, 28, 22, 10, SSD1306_WHITE);
+  // Pupils shifted up (looking up)
+  display.fillCircle(40, 20, 7, SSD1306_BLACK);
+  display.fillCircle(88, 20, 7, SSD1306_BLACK);
+  // Shine dots
+  display.fillRect(37, 17, 3, 3, SSD1306_WHITE);
+  display.fillRect(85, 17, 3, 3, SSD1306_WHITE);
+  // Animated thinking dots (...)
+  float dotPhase = (now % 1200) / 1200.0f;
+  for (int i = 0; i < 3; i++) {
+    float brightness = sin((dotPhase + i * 0.33f) * PI);
+    if (brightness > 0.5f) {
+      display.fillCircle(55 + i * 10, 52, 3, SSD1306_WHITE);
+    }
+  }
+  display.display();
+}
+
+// =========================================================
+// OLED Animation Update — call from loop() at ~30 fps
+// =========================================================
+void updateDisplayAnimation() {
+  unsigned long now = millis();
+  if (now - lastAnimFrameMs < 33) return; // ~30 fps
+  lastAnimFrameMs = now;
+
+  // Handle state transition: brief black flash, then switch state
+  if (targetDisplayState != currentDisplayState) {
+    display.clearDisplay();
+    display.display();
+    delay(60);
+    currentDisplayState = targetDisplayState;
+    animFrame = 0;
+  }
+
+  switch (currentDisplayState) {
+    case DisplayState::IDLE:      drawIdleState(now);      break;
+    case DisplayState::LISTENING: drawListeningState(now); break;
+    case DisplayState::SPEAKING:  drawSpeakingState(now);  break;
+    case DisplayState::THINKING:  drawThinkingState(now);  break;
+  }
+  animFrame++;
 }
 
 // =========================================================
@@ -609,16 +745,10 @@ void setup() {
 // Main Loop
 // =========================================================
 void loop() {
-  if (hasPendingDisplayUpdate) {
-    hasPendingDisplayUpdate = false;
-    String msgToRender = pendingDisplayMessage;
-    displayText(msgToRender.c_str());
-  }
-
   if (otaInProgress) {
     delay(20);
     return;
   }
-
+  updateDisplayAnimation();
   processAudio();
 }
