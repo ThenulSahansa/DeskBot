@@ -622,8 +622,15 @@ class MainActivity : ComponentActivity() {
                 val audioChar = service?.getCharacteristic(BLE_AUDIO_UUID)
                 val displayChar = service?.getCharacteristic(BLE_DISPLAY_UUID)
 
-                TerminalLog.log("BLE", "Services discovered (status=$status)", if (status == BluetoothGatt.GATT_SUCCESS) LogLevel.SUCCESS else LogLevel.ERROR)
+                commandCharacteristic = rx
+                firmwareCharacteristic = firmware
+                audioCharacteristic = audioChar
+                displayCharacteristic = displayChar
 
+                if (audioChar != null) TerminalLog.log("BLE", "Audio characteristic found", LogLevel.SUCCESS)
+                if (displayChar != null) TerminalLog.log("BLE", "Display characteristic found", LogLevel.SUCCESS)
+
+                // Enable local Android notifications immediately for statusChar
                 if (statusChar != null) {
                     gatt.setCharacteristicNotification(statusChar, true)
                     val descriptor = statusChar.getDescriptor(CCCD_UUID)
@@ -637,53 +644,65 @@ class MainActivity : ComponentActivity() {
                             gatt.writeDescriptor(descriptor)
                         }
                     }
-                    TerminalLog.log("BLE", "Subscribed to status notifications", LogLevel.INFO)
                 }
 
-                // Subscribe to audio notifications from ESP32
+                // Schedule audioChar CCCD descriptor write on main looper after 500ms
                 if (audioChar != null) {
                     gatt.setCharacteristicNotification(audioChar, true)
-                    val audioDescriptor = audioChar.getDescriptor(CCCD_UUID)
-                    if (audioDescriptor != null) {
-                        // Queue descriptor write after status descriptor completes
-                        android.os.Handler(mainLooper).postDelayed({
+                    android.os.Handler(mainLooper).postDelayed({
+                        val descriptor = audioChar.getDescriptor(CCCD_UUID)
+                        if (descriptor != null) {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                gatt.writeDescriptor(audioDescriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                             } else {
                                 @Suppress("DEPRECATION")
-                                audioDescriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                                 @Suppress("DEPRECATION")
-                                gatt.writeDescriptor(audioDescriptor)
+                                gatt.writeDescriptor(descriptor)
                             }
-                        }, 500)
-                    }
-                    TerminalLog.log("BLE", "Subscribed to audio notifications", LogLevel.INFO)
+                            TerminalLog.log("BLE", "Subscribed to Audio stream notifications", LogLevel.SUCCESS)
+                        }
+                    }, 500)
                 }
 
+                // Request MTU after descriptor writes complete
+                android.os.Handler(mainLooper).postDelayed({
+                    gatt.requestMtu(247)
+                }, 900)
+
                 runOnUiThread {
-                    isConnecting = false
-                    if (status == BluetoothGatt.GATT_SUCCESS && rx != null && firmware != null) {
-                        activeGatt = gatt
-                        commandCharacteristic = rx
-                        firmwareCharacteristic = firmware
-                        audioCharacteristic = audioChar
-                        displayCharacteristic = displayChar
-                        connectedDevice = dev
-                        gatt.requestMtu(247)
+                    onDeskBotSuccessfullyConnected(item.name)
+                }
+            }
 
-                        if (audioChar != null) TerminalLog.log("BLE", "Audio characteristic found", LogLevel.SUCCESS)
-                        if (displayChar != null) TerminalLog.log("BLE", "Display characteristic found", LogLevel.SUCCESS)
+            override fun onDescriptorWrite(
+                gatt: BluetoothGatt,
+                descriptor: BluetoothGattDescriptor,
+                status: Int
+            ) {
+                val charUuid = descriptor.characteristic.uuid
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    TerminalLog.log("BLE", "Notifications enabled for $charUuid", LogLevel.SUCCESS)
+                } else {
+                    TerminalLog.log("BLE", "Failed to enable notifications for $charUuid (status=$status)", LogLevel.ERROR)
+                }
 
-                        onDeskBotSuccessfullyConnected(item.name)
-                    } else {
-                        resetToDisconnectedUI()
-                        showConnectionErrorNotification(item.name, "DeskBot BLE service was not found")
-                        TerminalLog.log("BLE", "Service discovery failed — missing characteristics", LogLevel.ERROR)
-                        gatt.disconnect()
-                        gatt.close()
+                // STEP 3 of sequential GATT setup: Once BLE_STATUS_UUID CCCD write finishes,
+                // enable notifications on BLE_AUDIO_UUID, then auto-start the Gemini Live session.
+                if (charUuid == BLE_STATUS_UUID) {
+                    val audioChar = audioCharacteristic
+                    if (audioChar != null) {
+                        enableNotification(gatt, audioChar)
+                    }
+                } else if (charUuid == BLE_AUDIO_UUID) {
+                    runOnUiThread {
+                        if (!isAiSessionActive) {
+                            startAiSession()
+                        }
                     }
                 }
             }
+
 
             override fun onCharacteristicChanged(
                 gatt: BluetoothGatt,
@@ -691,7 +710,24 @@ class MainActivity : ComponentActivity() {
                 value: ByteArray
             ) {
                 if (characteristic.uuid == BLE_AUDIO_UUID) {
+                    // Check if the packet is a VOICE_START / VOICE_END control marker sent over audioChar
+                    if (value.size <= 16) {
+                        val marker = String(value, Charsets.UTF_8).trim()
+                        if (marker.contains("VOICE_START", ignoreCase = true)) {
+                            TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
+                            return
+                        } else if (marker.contains("VOICE_END", ignoreCase = true)) {
+                            TerminalLog.log("AUDIO", "Voice input ended – sending end of turn", LogLevel.INFO)
+                            geminiManager?.sendEndOfTurn()
+                            return
+                        }
+                    }
+
                     TerminalLog.log("AUDIO", "Received ${value.size} bytes of audio data", LogLevel.INFO)
+                    if (!isAiSessionActive || geminiManager == null) {
+                        TerminalLog.log("AUDIO", "AI session not started – tap 'Start' in Voice AI", LogLevel.WARN)
+                        return
+                    }
                     geminiManager?.sendAudio(value)
                 } else if (characteristic.uuid == BLE_STATUS_UUID) {
                     val statusText = String(value, Charsets.UTF_8).trim()
@@ -700,23 +736,8 @@ class MainActivity : ComponentActivity() {
                     if (statusText.contains("VOICE_START", ignoreCase = true)) {
                         TerminalLog.log("AUDIO", "Voice input started from ESP32", LogLevel.SUCCESS)
                     } else if (statusText.contains("VOICE_END", ignoreCase = true)) {
-                        TerminalLog.log("AUDIO", "Voice input ended — sending end of turn", LogLevel.INFO)
+                        TerminalLog.log("AUDIO", "Voice input ended – sending end of turn", LogLevel.INFO)
                         geminiManager?.sendEndOfTurn()
-                    }
-
-                    runOnUiThread {
-                        if (statusText.contains("Complete", ignoreCase = true) || statusText.contains("Restarting", ignoreCase = true)) {
-                            uiState.value = uiState.value.copy(
-                                otaStatusLabel = "Update Complete · DeskBot Restarting"
-                            )
-                            updateConnectionState(ConnectionState.CONNECTED, "DeskBot Restarting…")
-                        } else if (statusText.contains("Receiving", ignoreCase = true)) {
-                            uiState.value = uiState.value.copy(
-                                otaStatusLabel = "Flashing firmware to DeskBot…"
-                            )
-                        } else if (statusText.contains("failed", ignoreCase = true) || statusText.contains("Cannot", ignoreCase = true)) {
-                            Toast.makeText(this@MainActivity, statusText, Toast.LENGTH_SHORT).show()
-                        }
                     }
                 }
             }
@@ -734,11 +755,22 @@ class MainActivity : ComponentActivity() {
             override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     negotiatedMtu = mtu
+                    TerminalLog.log("BLE", "Negotiated MTU: $mtu bytes", LogLevel.SUCCESS)
                     runOnUiThread {
-                        uiState.value = uiState.value.copy(
-                            telemetryMtu = "$mtu B"
-                        )
+                        uiState.value = uiState.value.copy(telemetryMtu = "$mtu B")
                     }
+                }
+            }
+            private fun enableNotification(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+                gatt.setCharacteristicNotification(characteristic, true)
+                val descriptor = characteristic.getDescriptor(CCCD_UUID) ?: return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    gatt.writeDescriptor(descriptor)
                 }
             }
 

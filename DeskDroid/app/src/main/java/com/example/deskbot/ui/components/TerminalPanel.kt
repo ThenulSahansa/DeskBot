@@ -56,7 +56,8 @@ fun TerminalPanel(
     val listState = rememberLazyListState()
 
     // Auto-scroll to bottom on new entries
-    LaunchedEffect(entries.size) {
+    val lastEntryId = entries.lastOrNull()?.id
+    LaunchedEffect(lastEntryId) {
         if (entries.isNotEmpty()) {
             listState.animateScrollToItem(entries.size - 1)
         }
@@ -133,7 +134,10 @@ fun TerminalPanel(
                 .padding(top = 36.dp)
                 .padding(horizontal = 10.dp, vertical = 4.dp)
         ) {
-            items(entries) { entry ->
+            items(
+                items = entries,
+                key = { entry -> entry.id }
+            ) { entry ->
                 TerminalLogLine(entry)
             }
         }
