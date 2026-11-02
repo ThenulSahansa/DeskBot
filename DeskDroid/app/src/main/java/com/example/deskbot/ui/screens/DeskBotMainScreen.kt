@@ -87,7 +87,9 @@ data class DeskBotUiState(
     val otaStatusLabel: String = "Updating firmware…",
     val isTerminalVisible: Boolean = false,
     val isAiSessionActive: Boolean = false,
-    val lastGeminiResponse: String = ""
+    val lastGeminiResponse: String = "",
+    val isMuted: Boolean = false,
+    val isAudioOutputConnected: Boolean = false
 )
 
 @Composable
@@ -99,7 +101,8 @@ fun DeskBotMainScreen(
     onInstallUpdateClick: () -> Unit,
     onStatusClick: () -> Unit,
     onToggleTerminal: () -> Unit,
-    onToggleAiSession: () -> Unit
+    onToggleAiSession: () -> Unit,
+    onToggleMute: () -> Unit
 ) {
     val scrollState = rememberScrollState()
     val statusBarPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -682,20 +685,46 @@ fun DeskBotMainScreen(
                         }
 
                         // Start / Stop Session Button
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (state.isAiSessionActive) CatppuccinRed else CatppuccinMauve)
-                                .clickable { onToggleAiSession() }
-                                .padding(horizontal = 14.dp, vertical = 7.dp),
-                            contentAlignment = Alignment.Center
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                text = if (state.isAiSessionActive) "Stop" else "Start",
-                                color = CatppuccinCrust,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            // Mute / Unmute Button — only visible when audio output device is connected
+                            if (state.isAudioOutputConnected) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(if (state.isMuted) CatppuccinRed else CatppuccinTeal)
+                                        .clickable { onToggleMute() },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        painter = painterResource(
+                                            id = if (state.isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic
+                                        ),
+                                        contentDescription = if (state.isMuted) "Unmute TTS" else "Mute TTS",
+                                        tint = CatppuccinCrust,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (state.isAiSessionActive) CatppuccinRed else CatppuccinMauve)
+                                    .clickable { onToggleAiSession() }
+                                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (state.isAiSessionActive) "Stop" else "Start",
+                                    color = CatppuccinCrust,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
 

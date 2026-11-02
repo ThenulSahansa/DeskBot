@@ -10,21 +10,26 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.location.LocationManager
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.speech.tts.TextToSpeech
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
@@ -58,6 +63,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -75,6 +81,20 @@ class MainActivity : ComponentActivity() {
 
     private var isConnected = false
     private var isConnecting = false
+
+    // Text-to-Speech engine for speaking Gemini replies via connected audio output devices
+    private var tts: TextToSpeech? = null
+    private var isTtsReady = false
+
+    // AudioManager for detecting wired/BT audio output devices
+    private lateinit var audioManager: AudioManager
+
+    // BroadcastReceiver that listens for wired headset plug/unplug and BT headset state changes
+    private val audioOutputReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            updateAudioOutputState()
+        }
+    }
 
     // Bluetooth properties
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -282,6 +302,17 @@ class MainActivity : ComponentActivity() {
         bluetoothAdapter = bluetoothManager?.adapter
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
 
+        // Initialize AudioManager for audio output detection
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+
+        // Initialize Text-to-Speech engine
+        tts = TextToSpeech(this) { status ->
+            isTtsReady = status == TextToSpeech.SUCCESS
+            if (isTtsReady) {
+                tts?.language = Locale.getDefault()
+            }
+        }
+
         setContent {
             DeskBotTheme {
                 DeskBotMainScreen(
@@ -292,7 +323,8 @@ class MainActivity : ComponentActivity() {
                     onInstallUpdateClick = { handleInstallUpdateAction() },
                     onStatusClick = { handleStatusAction() },
                     onToggleTerminal = { handleToggleTerminal() },
-                    onToggleAiSession = { handleToggleAiSession() }
+                    onToggleAiSession = { handleToggleAiSession() },
+                    onToggleMute = { handleToggleMute() }
                 )
             }
         }
@@ -1175,6 +1207,10 @@ class MainActivity : ComponentActivity() {
             onResponse = { responseText ->
                 runOnUiThread {
                     uiState.value = uiState.value.copy(lastGeminiResponse = responseText)
+                    // Speak the response through connected audio output device if not muted
+                    if (uiState.value.isAudioOutputConnected && !uiState.value.isMuted && isTtsReady) {
+                        tts?.speak(responseText, TextToSpeech.QUEUE_FLUSH, null, "gemini_reply")
+                    }
                 }
                 sendTextToDisplay(responseText)
             },
@@ -1234,9 +1270,63 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Register receiver to watch for wired headset and Bluetooth headset changes
+        val filter = IntentFilter().apply {
+            addAction(AudioManager.ACTION_HEADSET_PLUG)
+            addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+        }
+        registerReceiver(audioOutputReceiver, filter)
+        // Sync initial state in case a device was connected before this screen was visible
+        updateAudioOutputState()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try {
+            unregisterReceiver(audioOutputReceiver)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Returns true if a wired headset, Bluetooth A2DP, or Bluetooth SCO audio output device
+     * is currently connected.
+     */
+    @Suppress("DEPRECATION")
+    private fun isAudioOutputDeviceConnected(): Boolean {
+        return audioManager.isWiredHeadsetOn ||
+               audioManager.isBluetoothA2dpOn ||
+               audioManager.isBluetoothScoOn
+    }
+
+    /**
+     * Reads the current audio output state and pushes it into [uiState].
+     * Always called on a background thread via [BroadcastReceiver.onReceive], so
+     * we use [runOnUiThread] to update Compose state safely.
+     */
+    private fun updateAudioOutputState() {
+        runOnUiThread {
+            uiState.value = uiState.value.copy(isAudioOutputConnected = isAudioOutputDeviceConnected())
+        }
+    }
+
+    /**
+     * Toggles the TTS mute state and updates [uiState].
+     */
+    private fun handleToggleMute() {
+        triggerHapticFeedback()
+        val newMuted = !uiState.value.isMuted
+        uiState.value = uiState.value.copy(isMuted = newMuted)
+        TerminalLog.log("TTS", "TTS ${if (newMuted) "muted" else "unmuted"}", LogLevel.INFO)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         stopAiSession()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
         try {
             stopBluetoothScan()
             activeGatt?.close()
